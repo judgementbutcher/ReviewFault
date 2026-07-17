@@ -20,7 +20,7 @@ jobs:
         env:
           LD_LIBRARY_PATH: ${{ github.workspace }}/build
       - run: >-
-          dotnet msbuild apps/windows/ReviewFault/ReviewFault.csproj -t:Compile
+          dotnet msbuild apps/windows/ReviewFault/ReviewFault.csproj -restore -t:Compile
           -p:Platform=x64 -p:SkipNativeBuild=true -p:EnableWindowsTargeting=true
           -p:AppxGeneratePriEnabled=false
           -p:AppxGeneratePrisForPortableLibrariesEnabled=false
@@ -47,7 +47,8 @@ jobs:
       - uses: actions/setup-dotnet@v4
         with:
           dotnet-version: 8.0.x
-      - run: dotnet build apps/windows/ReviewFault/ReviewFault.csproj -p:Platform=x64
+      - uses: microsoft/setup-msbuild@v2
+      - run: msbuild apps/windows/ReviewFault/ReviewFault.csproj -restore -p:Platform=x64
 
 # HarmonyOS SDK and signing are installed through DevEco Studio and are not
 # redistributable on GitHub-hosted runners. Run the entry module in the
