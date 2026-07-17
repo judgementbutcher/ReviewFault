@@ -8,15 +8,19 @@ using Windows.Storage.Pickers;
 using WinRT.Interop;
 using System.Text.Json;
 using System.Text.RegularExpressions;
+using ReviewFault.Components;
+using ReviewFault.Services;
+using ReviewFault.ViewModels;
+using Windows.Storage;
 
 namespace ReviewFault;
 
 public sealed class MainWindow : Window
 {
-    private readonly AppRepository repository = new();
+    private readonly AppViewModel viewModel = new();
     private readonly Grid Root = new()
     {
-        Background = new SolidColorBrush(Windows.UI.Color.FromArgb(255, 247, 245, 239)),
+        Background = new SolidColorBrush(DesignTokens.LightBackground),
     };
     private readonly NavigationView Navigation = new()
     {
@@ -26,6 +30,7 @@ public sealed class MainWindow : Window
         PaneDisplayMode = NavigationViewPaneDisplayMode.Left,
     };
     private bool initialized;
+    private ReminderService? reminderService;
 
     public MainWindow()
     {
@@ -40,11 +45,11 @@ public sealed class MainWindow : Window
             if (args.SelectedItemContainer?.Tag is not string destination) return;
             switch (destination)
             {
-                case "today": await ShowHomeAsync(); break;
-                case "library": await ShowLibraryAsync(""); break;
-                case "add": ShowAdd(); break;
-                case "settings": await ShowSettingsAsync(); break;
-                case "trash": await ShowTrashAsync(); break;
+                case "today": viewModel.Navigate(AppDestination.Today); await ShowHomeAsync(); break;
+                case "library": viewModel.Navigate(AppDestination.Library); await ShowLibraryAsync(""); break;
+                case "add": viewModel.Navigate(AppDestination.Add); ShowAdd(); break;
+                case "settings": viewModel.Navigate(AppDestination.Settings); await ShowSettingsAsync(); break;
+                case "trash": viewModel.Navigate(AppDestination.Trash); await ShowTrashAsync(); break;
             }
         };
         Content = Navigation;
@@ -62,7 +67,11 @@ public sealed class MainWindow : Window
     {
         try
         {
-            await repository.InitializeAsync();
+            await viewModel.InitializeAsync();
+            reminderService = new ReminderService(viewModel.Repository, DispatcherQueue);
+            var storedTheme = ApplicationData.Current.LocalSettings.Values["appearance.theme"] as string ?? "system";
+            Root.RequestedTheme = storedTheme switch {
+                "light" => ElementTheme.Light, "dark" => ElementTheme.Dark, _ => ElementTheme.Default };
             await ShowHomeAsync();
         }
         catch (Exception error)
@@ -81,7 +90,7 @@ public sealed class MainWindow : Window
     {
         var now = DateTimeOffset.UtcNow.ToUnixTimeSeconds();
         var dayStart = new DateTimeOffset(DateTime.Today).ToUnixTimeSeconds();
-        var summary = await repository.DashboardAsync(now, dayStart);
+        var summary = await viewModel.Repository.DashboardAsync(now, dayStart);
         var panel = PagePanel();
         panel.Children.Add(Heading("ReviewFault", 32));
         panel.Children.Add(Body("把今天该复习的交给算法"));
@@ -112,7 +121,8 @@ public sealed class MainWindow : Window
 
     private async Task ShowSettingsAsync()
     {
-        var current = await repository.GetLearningPreferencesAsync();
+        var current = await viewModel.Repository.GetLearningPreferencesAsync();
+        var local = ApplicationData.Current.LocalSettings.Values;
         var newLimit = new NumberBox { Header = "每日新 408 上限", Value = current.DailyNewMemoryLimit,
             Minimum = 0, Maximum = 500, SpinButtonPlacementMode = NumberBoxSpinButtonPlacementMode.Inline };
         var minutes = new NumberBox { Header = "单次学习时长（分钟）", Value = current.SessionMinutes,
@@ -121,41 +131,69 @@ public sealed class MainWindow : Window
             SelectedIndex = current.MemoryPreset switch { "time_saving" => 0, "reinforced" => 2, _ => 1 } };
         var math = new ComboBox { Header = "数学复习强度", ItemsSource = new[] { "密集", "均衡", "舒缓" },
             SelectedIndex = current.MathIntensity switch { "intensive" => 0, "relaxed" => 2, _ => 1 } };
+        var appearance = new ComboBox { Header = "外观（仅本设备）",
+            ItemsSource = new[] { "跟随系统", "浅色", "深色" },
+            SelectedIndex = (local["appearance.theme"] as string) switch { "light" => 1, "dark" => 2, _ => 0 } };
+        var reminder = new ToggleSwitch { Header = "本地提醒（仅有待复习内容时发送）",
+            IsOn = local["reminder.enabled"] is true };
+        var reminderTime = new TimePicker { Header = "提醒时间", ClockIdentifier = "24HourClock" };
+        if (TimeOnly.TryParse(local["reminder.time"] as string ?? "20:00", out var parsedTime))
+            reminderTime.Time = parsedTime.ToTimeSpan();
+        var storedMask = local["reminder.weekdays"] is int mask ? mask : 0x7f;
+        var weekdayLabels = new[] { "一", "二", "三", "四", "五", "六", "日" };
+        var weekdayChecks = weekdayLabels.Select((label, index) => new CheckBox {
+            Content = "周" + label, IsChecked = (storedMask & (1 << index)) != 0,
+            MinHeight = DesignTokens.MinimumTarget }).ToArray();
+        var weekdayRow = new StackPanel { Orientation = Orientation.Horizontal, Spacing = 6 };
+        foreach (var check in weekdayChecks) weekdayRow.Children.Add(check);
         var panel = PagePanel();
         panel.Children.Add(Heading("设置", 32));
         panel.Children.Add(Heading("学习与算法", 20));
         panel.Children.Add(newLimit); panel.Children.Add(minutes); panel.Children.Add(memory); panel.Children.Add(math);
+        panel.Children.Add(appearance); panel.Children.Add(reminder); panel.Children.Add(reminderTime);
+        panel.Children.Add(Body("提醒星期")); panel.Children.Add(weekdayRow);
         panel.Children.Add(ActionButton("保存学习设置", async () =>
         {
-            await repository.SaveLearningPreferencesAsync(new LearningPreferences(
+            await viewModel.Repository.SaveLearningPreferencesAsync(new LearningPreferences(
                 (int)newLimit.Value, (int)minutes.Value,
                 memory.SelectedIndex switch { 0 => "time_saving", 2 => "reinforced", _ => "balanced" },
                 math.SelectedIndex switch { 0 => "intensive", 2 => "relaxed", _ => "balanced" }, true, true));
+            var themeValue = appearance.SelectedIndex switch { 1 => "light", 2 => "dark", _ => "system" };
+            local["appearance.theme"] = themeValue;
+            local["reminder.enabled"] = reminder.IsOn;
+            local["reminder.time"] = TimeOnly.FromTimeSpan(reminderTime.Time).ToString("HH:mm");
+            var selectedMask = 0;
+            for (var index = 0; index < weekdayChecks.Length; index++)
+                if (weekdayChecks[index].IsChecked == true) selectedMask |= 1 << index;
+            local["reminder.weekdays"] = selectedMask;
+            Root.RequestedTheme = themeValue switch {
+                "light" => ElementTheme.Light, "dark" => ElementTheme.Dark, _ => ElementTheme.Default };
+            await (reminderService?.CheckAsync() ?? Task.CompletedTask);
             await MessageAsync("设置已保存；只影响此后的作答。");
         }));
         panel.Children.Add(Heading("数据", 20));
         panel.Children.Add(ActionButton("导出完整备份", ExportBackupAsync));
         panel.Children.Add(ActionButton("从备份恢复", RestoreBackupAsync));
-        panel.Children.Add(Body("主题、提醒时间和通知权限保存在本设备，不会被备份恢复覆盖。"));
+        panel.Children.Add(Body("主题、提醒时间、星期和通知权限保存在本设备，不会被备份恢复覆盖。"));
         SetPage(panel);
     }
 
     private async Task ShowTrashAsync()
     {
-        var rows = await repository.TrashAsync();
+        var rows = await viewModel.Repository.TrashAsync();
         var panel = PagePanel();
         panel.Children.Add(Heading("回收站", 32));
         panel.Children.Add(Body("删除不会清除复习日志或媒体，可随时恢复。"));
         if (rows.Count == 0) panel.Children.Add(Body("回收站为空"));
         foreach (var row in rows)
             panel.Children.Add(Card(Body(row.Prompt.Length == 0 ? "图片题面" : row.Prompt),
-                ActionButton("恢复", async () => { await repository.RestoreAsync(new[] { row.Id }); await ShowTrashAsync(); })));
+                ActionButton("恢复", async () => { await viewModel.Repository.RestoreAsync(new[] { row.Id }); await ShowTrashAsync(); })));
         SetPage(panel);
     }
 
     private async Task ShowReviewAsync()
     {
-        var row = await repository.NextForReviewAsync(DateTimeOffset.UtcNow.ToUnixTimeSeconds());
+        var row = await viewModel.Repository.NextForReviewAsync(DateTimeOffset.UtcNow.ToUnixTimeSeconds());
         if (row is null)
         {
             await MessageAsync("当前没有到期内容，可以先新建一张卡片。");
@@ -167,11 +205,11 @@ public sealed class MainWindow : Window
         panel.Children.Add(Heading(
             row.Kind == "math_problem" ? "先独立完成，再看答案" : "先在脑中或纸上作答", 28));
         if (!string.IsNullOrWhiteSpace(row.Prompt)) panel.Children.Add(Card(Body(ReviewPrompt(row))));
-        foreach (var mediaPath in await repository.MediaPathsAsync(row.Id))
+        foreach (var mediaPath in await viewModel.Repository.MediaPathsAsync(row.Id))
         {
             panel.Children.Add(new Image
             {
-                Source = new BitmapImage(new Uri(repository.ResolveMediaPath(mediaPath))),
+                Source = new BitmapImage(new Uri(viewModel.Repository.ResolveMediaPath(mediaPath))),
                 MaxHeight = 420,
                 Stretch = Stretch.Uniform,
                 HorizontalAlignment = HorizontalAlignment.Left,
@@ -217,7 +255,7 @@ public sealed class MainWindow : Window
             ratings.Children.Add(ActionButton(label, async () =>
             {
                 var reviewedAt = DateTimeOffset.UtcNow.ToUnixTimeSeconds();
-                var result = await repository.ReviewAsync(
+                var result = await viewModel.Repository.ReviewAsync(
                     row, rating, reviewedAt, checked((int)(reviewedAt - startedAt)), mathResult);
                 await MessageAsync($"已保存，下次间隔约 {FormatInterval(result.ScheduledDays)}。");
                 await ShowReviewAsync();
@@ -271,7 +309,7 @@ public sealed class MainWindow : Window
             await MessageAsync(validationError);
             return;
         }
-        await repository.CreateMemoryCardAsync(
+        await viewModel.Repository.CreateMemoryCardAsync(
             templates[template.SelectedIndex], subjects[subject.SelectedIndex],
             prompt.Text, answer.Text, lines);
         await ShowHomeAsync();
@@ -279,7 +317,7 @@ public sealed class MainWindow : Window
 
     private async Task ShowLibraryAsync(string queryText)
     {
-        var rows = await repository.SearchAsync(queryText);
+        var rows = await viewModel.Repository.SearchAsync(queryText);
         var panel = PagePanel();
         panel.Children.Add(Heading("我的题库", 28));
         var query = new TextBox { PlaceholderText = "搜索题干、答案或来源", Text = queryText };
@@ -303,10 +341,10 @@ public sealed class MainWindow : Window
         var panel = PagePanel();
         panel.Children.Add(Body(row.Kind == "math_problem" ? "数学错题" : SubjectLabel(row.Subject)));
         panel.Children.Add(Heading(string.IsNullOrWhiteSpace(row.Prompt) ? "图片题面" : row.Prompt, 26));
-        foreach (var mediaPath in await repository.MediaPathsAsync(row.Id))
+        foreach (var mediaPath in await viewModel.Repository.MediaPathsAsync(row.Id))
             panel.Children.Add(new Image
             {
-                Source = new BitmapImage(new Uri(repository.ResolveMediaPath(mediaPath))),
+                Source = new BitmapImage(new Uri(viewModel.Repository.ResolveMediaPath(mediaPath))),
                 MaxHeight = 420,
                 Stretch = Stretch.Uniform,
                 HorizontalAlignment = HorizontalAlignment.Left,
@@ -390,7 +428,7 @@ public sealed class MainWindow : Window
         };
         if (await dialog.ShowAsync() != ContentDialogResult.Primary) return;
         string?[] reasonValues = { null, "concept", "approach", "calculation", "misread", "forgotten_fact", "timeout", "other" };
-        await repository.UpdateMathDetailsAsync(
+        await viewModel.Repository.UpdateMathDetailsAsync(
             row.Id, solution.Text, wrongStep.Text, hint.Text, reasonValues[reason.SelectedIndex]);
         await ShowReviewAsync();
     }
@@ -411,7 +449,7 @@ public sealed class MainWindow : Window
             CloseButtonText = "取消",
         };
         if (await dialog.ShowAsync() != ContentDialogResult.Primary) return;
-        await repository.UpdateMemoryCardAsync(row.Id, prompt.Text, answer.Text);
+        await viewModel.Repository.UpdateMemoryCardAsync(row.Id, prompt.Text, answer.Text);
         await ShowLibraryAsync("");
     }
 
@@ -440,7 +478,7 @@ public sealed class MainWindow : Window
             await MessageAsync("每道题最多选择 5 张图片。");
             return;
         }
-        await repository.CreateMathProblemAsync(files.Select(file => file.Path).ToArray(), source.Text);
+        await viewModel.Repository.CreateMathProblemAsync(files.Select(file => file.Path).ToArray(), source.Text);
         await ShowHomeAsync();
     }
 
@@ -453,7 +491,7 @@ public sealed class MainWindow : Window
         if (file is null) return;
         await using var stream = await file.OpenStreamForWriteAsync();
         stream.SetLength(0);
-        await repository.ExportBackupAsync(stream);
+        await viewModel.Repository.ExportBackupAsync(stream);
         await MessageAsync("完整备份已导出。");
     }
 
@@ -475,7 +513,7 @@ public sealed class MainWindow : Window
         var file = await picker.PickSingleFileAsync();
         if (file is null) return;
         await using var stream = await file.OpenStreamForReadAsync();
-        await repository.RestoreBackupAsync(stream);
+        await viewModel.Repository.RestoreBackupAsync(stream);
         await MessageAsync("数据已恢复。");
         await ShowHomeAsync();
     }
@@ -503,7 +541,7 @@ public sealed class MainWindow : Window
         Text = value,
         FontSize = size,
         FontWeight = Microsoft.UI.Text.FontWeights.SemiBold,
-        Foreground = new SolidColorBrush(Windows.UI.Color.FromArgb(255, 30, 54, 43)),
+            Foreground = new SolidColorBrush(DesignTokens.LightHeading),
         TextWrapping = TextWrapping.Wrap,
     };
 
@@ -522,14 +560,14 @@ public sealed class MainWindow : Window
         {
             Child = content,
             Background = new SolidColorBrush(Windows.UI.Color.FromArgb(255, 255, 255, 255)),
-            Padding = new Thickness(20),
-            CornerRadius = new CornerRadius(12),
+            Padding = DesignTokens.CardPadding,
+            CornerRadius = DesignTokens.CardRadius,
         };
     }
 
     private static Button ActionButton(string label, Func<Task> action)
     {
-        var button = new Button { Content = label, MinHeight = 44 };
+        var button = new Button { Content = label, MinHeight = DesignTokens.MinimumTarget };
         button.Click += async (_, _) =>
         {
             button.IsEnabled = false;

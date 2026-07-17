@@ -4,13 +4,14 @@ import { photoAccessHelper } from '@kit.MediaLibraryKit';
 import { picker } from '@kit.CoreFileKit';
 import { camera, cameraPicker } from '@kit.CameraKit';
 import { AppRepository, DashboardSummary, StudyRow, LearningPreferences } from '../data/AppRepository';
+import { ReviewFaultUiState } from '../state/ReviewFaultUiState';
+import { ReviewFaultViewModel } from '../viewmodel/ReviewFaultViewModel';
 
 @Entry
 @Component
 struct Index {
-  private repository: AppRepository = AppRepository.shared();
-  @State private ready: boolean = false;
-  @State private screen: string = 'home';
+  private viewModel: ReviewFaultViewModel = ReviewFaultViewModel.shared();
+  @State private uiState: ReviewFaultUiState = new ReviewFaultUiState();
   @State private summary: DashboardSummary = { overdue: 0, dueToday: 0, newItems: 0, estimatedMinutes: 0 };
   @State private current?: StudyRow = undefined;
   @State private revealed: boolean = false;
@@ -39,8 +40,8 @@ struct Index {
       if (context === undefined) {
         throw new Error('无法获取应用上下文');
       }
-      await this.repository.initialize(context);
-      this.ready = true;
+      await this.viewModel.initialize(context);
+      this.uiState.ready = true;
       await this.refreshHome();
     } catch (error) {
       promptAction.showToast({ message: `启动失败：${(error as Error).message}`, duration: 5000 });
@@ -51,21 +52,21 @@ struct Index {
     const now = Math.floor(Date.now() / 1000);
     const today = new Date();
     today.setHours(0, 0, 0, 0);
-    this.summary = await this.repository.dashboard(now, Math.floor(today.getTime() / 1000));
-    this.screen = 'home';
+    this.summary = await this.viewModel.dashboard(now, Math.floor(today.getTime() / 1000));
+    this.uiState.screen = 'home';
   }
 
   async beginReview(): Promise<void> {
-    this.current = await this.repository.nextForReview(Math.floor(Date.now() / 1000));
+    this.current = await this.viewModel.repository.nextForReview(Math.floor(Date.now() / 1000));
     if (this.current === undefined) {
       promptAction.showToast({ message: '当前没有到期内容，可以先新建一张卡片' });
       return;
     }
     this.reviewStartedAt = Math.floor(Date.now() / 1000);
-    this.currentMediaPaths = await this.repository.mediaPaths(this.current.id);
+    this.currentMediaPaths = await this.viewModel.repository.mediaPaths(this.current.id);
     this.revealed = false;
     this.shownHintCount = 0;
-    this.screen = 'review';
+    this.uiState.screen = 'review';
   }
 
   async score(rating: number, mathResult?: string): Promise<void> {
@@ -76,7 +77,7 @@ struct Index {
       const reviewedAt = Math.floor(Date.now() / 1000);
       const reasons: (string | undefined)[] = [undefined, 'concept', 'approach', 'calculation',
         'misread', 'forgotten_fact', 'timeout', 'other'];
-      const result = await this.repository.review(
+      const result = await this.viewModel.repository.review(
         this.current, rating, reviewedAt, reviewedAt - this.reviewStartedAt, mathResult,
         mathResult === 'wrong' ? reasons[this.errorReasonIndex] : undefined);
       promptAction.showToast({ message: `已保存，下次约 ${this.formatInterval(result.scheduledDays)} 后` });
@@ -92,7 +93,7 @@ struct Index {
     const lines = this.structured.split('\n').map((value) => value.trim()).filter((value) => value.length > 0);
     try {
       this.validateMemory(templates[this.templateIndex], lines);
-      await this.repository.createMemoryCard(
+      await this.viewModel.repository.createMemoryCard(
         templates[this.templateIndex], subjects[this.subjectIndex], this.prompt, this.answer, lines);
       this.clearEditor();
       promptAction.showToast({ message: '408 卡片已保存' });
@@ -104,7 +105,7 @@ struct Index {
 
   async saveMath(): Promise<void> {
     try {
-      await this.repository.createMathProblem(this.prompt, this.sourceName);
+      await this.viewModel.repository.createMathProblem(this.prompt, this.sourceName);
       this.clearEditor();
       promptAction.showToast({ message: '数学题已保存' });
       await this.refreshHome();
@@ -118,7 +119,7 @@ struct Index {
     const reasons: (string | undefined)[] = [undefined, 'concept', 'approach', 'calculation',
       'misread', 'forgotten_fact', 'timeout', 'other'];
     try {
-      await this.repository.updateMathDetails(this.current.id, this.answer, this.wrongStep,
+      await this.viewModel.repository.updateMathDetails(this.current.id, this.answer, this.wrongStep,
         this.keyHint, reasons[this.errorReasonIndex]);
       promptAction.showToast({ message: '错题复盘已保存' });
       await this.beginReview();
@@ -130,7 +131,7 @@ struct Index {
   async saveMemoryEdit(): Promise<void> {
     if (this.current === undefined) return;
     try {
-      await this.repository.updateMemoryCard(this.current.id, this.prompt, this.answer);
+      await this.viewModel.repository.updateMemoryCard(this.current.id, this.prompt, this.answer);
       promptAction.showToast({ message: '记忆卡已更新' });
       this.searchQuery = '';
       await this.showLibrary();
@@ -149,7 +150,7 @@ struct Index {
       if (picked.photoUris.length === 0) return;
       const context = AppStorage.get<common.UIAbilityContext>('abilityContext');
       if (context === undefined) throw new Error('无法获取应用上下文');
-      await this.repository.createMathProblemFromImages(context, picked.photoUris, '');
+      await this.viewModel.repository.createMathProblemFromImages(context, picked.photoUris, '');
       promptAction.showToast({ message: `${picked.photoUris.length} 张题面已保存，稍后可直接重做` });
       await this.refreshHome();
     } catch (error) {
@@ -167,7 +168,7 @@ struct Index {
       const result = await cameraPicker.pick(
         context, [cameraPicker.PickerMediaType.PHOTO], profile);
       if (result.resultCode !== 0 || result.resultUri.length === 0) return;
-      await this.repository.createMathProblemFromImage(context, result.resultUri, '');
+      await this.viewModel.repository.createMathProblemFromImage(context, result.resultUri, '');
       promptAction.showToast({ message: '题面照片已保存，稍后可直接重做' });
       await this.refreshHome();
     } catch (error) {
@@ -177,20 +178,20 @@ struct Index {
 
   async showLibrary(): Promise<void> {
     try {
-      this.library = await this.repository.search(this.searchQuery);
-      this.screen = 'library';
+      this.library = await this.viewModel.search(this.searchQuery);
+      this.uiState.screen = 'library';
     } catch (error) {
       promptAction.showToast({ message: (error as Error).message, duration: 4000 });
     }
   }
 
   async showSettings(): Promise<void> {
-    const value = await this.repository.learningPreferences();
+    const value = await this.viewModel.learningPreferences();
     this.dailyNewLimit = value.dailyNewMemoryLimit.toString();
     this.sessionMinutes = value.sessionMinutes.toString();
     this.memoryPresetIndex = value.memoryPreset === 'time_saving' ? 0 : value.memoryPreset === 'reinforced' ? 2 : 1;
     this.mathIntensityIndex = value.mathIntensity === 'intensive' ? 0 : value.mathIntensity === 'relaxed' ? 2 : 1;
-    this.screen = 'settings';
+    this.uiState.screen = 'settings';
   }
 
   async saveSettings(): Promise<void> {
@@ -199,30 +200,30 @@ struct Index {
       memoryPreset: this.memoryPresetIndex === 0 ? 'time_saving' : this.memoryPresetIndex === 2 ? 'reinforced' : 'balanced',
       mathIntensity: this.mathIntensityIndex === 0 ? 'intensive' : this.mathIntensityIndex === 2 ? 'relaxed' : 'balanced',
     };
-    await this.repository.saveLearningPreferences(value);
+    await this.viewModel.repository.saveLearningPreferences(value);
     promptAction.showToast({ message: '设置已保存，只影响之后的作答' });
   }
 
   async showTrash(): Promise<void> {
-    this.library = await this.repository.search('', true);
-    this.screen = 'trash';
+    this.library = await this.viewModel.search('', true);
+    this.uiState.screen = 'trash';
   }
 
   async deleteCurrent(): Promise<void> {
     if (this.current === undefined) return;
     const id = this.current.id;
-    await this.repository.softDelete([id]);
+    await this.viewModel.repository.softDelete([id]);
     const choice = await promptAction.showDialog({ title: '已移入回收站',
       message: '复习日志和媒体仍会保留。',
       buttons: [{ text: '完成', color: '#666666' }, { text: '撤销', color: '#315C49' }] });
-    if (choice.index === 1) await this.repository.restore([id]);
+    if (choice.index === 1) await this.viewModel.repository.restore([id]);
     await this.refreshHome();
   }
 
   async openLibraryDetail(row: StudyRow): Promise<void> {
     this.current = row;
-    this.currentMediaPaths = await this.repository.mediaPaths(row.id);
-    this.screen = 'libraryDetail';
+    this.currentMediaPaths = await this.viewModel.repository.mediaPaths(row.id);
+    this.uiState.screen = 'libraryDetail';
   }
 
   async exportBackup(): Promise<void> {
@@ -234,7 +235,7 @@ struct Index {
       options.newFileNames = [`ReviewFault-${date}.reviewfault`];
       const uris = await new picker.DocumentViewPicker(context).save(options);
       if (uris.length === 0) return;
-      await this.repository.exportBackup(context, uris[0]);
+      await this.viewModel.repository.exportBackup(context, uris[0]);
       promptAction.showToast({ message: '完整备份已导出' });
     } catch (error) {
       promptAction.showToast({ message: (error as Error).message, duration: 4000 });
@@ -253,7 +254,7 @@ struct Index {
       if (context === undefined) throw new Error('无法获取应用上下文');
       const uris = await new picker.DocumentViewPicker(context).select(new picker.DocumentSelectOptions());
       if (uris.length === 0) return;
-      await this.repository.restoreBackup(context, uris[0]);
+      await this.viewModel.repository.restoreBackup(context, uris[0]);
       promptAction.showToast({ message: '数据已恢复' });
       await this.refreshHome();
     } catch (error) {
@@ -349,10 +350,10 @@ struct Index {
       Button('拍照录入数学错题').width('100%').onClick(() => this.captureMathImage())
       Button('从相册导入数学错题').width('100%').onClick(() => this.pickMathImage())
       Button('用文字录入数学题').width('100%').onClick(() => {
-        this.clearEditor(); this.screen = 'newMath';
+        this.clearEditor(); this.uiState.screen = 'newMath';
       })
       Button('新建 408 记忆卡').width('100%').onClick(() => {
-        this.clearEditor(); this.screen = 'newMemory';
+        this.clearEditor(); this.uiState.screen = 'newMemory';
       })
       Button('浏览 / 搜索题库').width('100%').onClick(() => {
         this.searchQuery = ''; this.showLibrary();
@@ -385,13 +386,13 @@ struct Index {
             this.wrongStep = '';
             this.keyHint = '';
             this.errorReasonIndex = 0;
-            this.screen = 'mathDetails';
+            this.uiState.screen = 'mathDetails';
           })
         } else {
           Button('编辑记忆卡').width('100%').backgroundColor('#315C49').onClick(() => {
             this.prompt = this.current?.prompt ?? '';
             this.answer = this.current?.answer ?? '';
-            this.screen = 'memoryEdit';
+            this.uiState.screen = 'memoryEdit';
           })
         }
         if (this.current.templateType === 'layered_hint') {
@@ -539,13 +540,13 @@ struct Index {
           Button('编辑错题复盘').width('100%').backgroundColor('#315C49').onClick(() => {
             this.answer = this.current?.answer ?? '';
             this.wrongStep = ''; this.keyHint = ''; this.errorReasonIndex = 0;
-            this.screen = 'mathDetails';
+            this.uiState.screen = 'mathDetails';
           })
         } else {
           Button('编辑记忆卡').width('100%').backgroundColor('#315C49').onClick(() => {
             this.prompt = this.current?.prompt ?? '';
             this.answer = this.current?.answer ?? '';
-            this.screen = 'memoryEdit';
+            this.uiState.screen = 'memoryEdit';
           })
         }
         Button('返回题库').width('100%').onClick(() => this.showLibrary())
@@ -582,7 +583,7 @@ struct Index {
       ForEach(this.library, (row: StudyRow) => {
         Column({ space: 8 }) {
           Text(row.prompt.length === 0 ? '图片题面' : row.prompt).fontSize(17)
-          Button('恢复').onClick(async () => { await this.repository.restore([row.id]); await this.showTrash(); })
+          Button('恢复').onClick(async () => { await this.viewModel.repository.restore([row.id]); await this.showTrash(); })
         }.alignItems(HorizontalAlign.Start).width('100%').padding(16)
           .backgroundColor('#FFFFFF').borderRadius(12)
       }, (row: StudyRow) => row.id)
@@ -606,25 +607,25 @@ struct Index {
   build() {
     Stack() {
       Scroll() {
-        if (!this.ready) {
+        if (!this.uiState.ready) {
           Column() { Text('正在初始化…').fontSize(18) }.padding(28)
-        } else if (this.screen === 'home') {
+        } else if (this.uiState.screen === 'home') {
           this.homeScreen()
-        } else if (this.screen === 'review') {
+        } else if (this.uiState.screen === 'review') {
           this.reviewScreen()
-        } else if (this.screen === 'newMemory') {
+        } else if (this.uiState.screen === 'newMemory') {
           this.memoryEditor()
-        } else if (this.screen === 'mathDetails') {
+        } else if (this.uiState.screen === 'mathDetails') {
           this.mathDetailsEditor()
-        } else if (this.screen === 'library') {
+        } else if (this.uiState.screen === 'library') {
           this.libraryScreen()
-        } else if (this.screen === 'libraryDetail') {
+        } else if (this.uiState.screen === 'libraryDetail') {
           this.libraryDetailScreen()
-        } else if (this.screen === 'memoryEdit') {
+        } else if (this.uiState.screen === 'memoryEdit') {
           this.memoryEditScreen()
-        } else if (this.screen === 'settings') {
+        } else if (this.uiState.screen === 'settings') {
           this.settingsScreen()
-        } else if (this.screen === 'trash') {
+        } else if (this.uiState.screen === 'trash') {
           this.trashScreen()
         } else {
           this.mathEditor()
@@ -632,7 +633,19 @@ struct Index {
       }
       .width('100%')
       .height('100%')
-      .padding({ left: 22, right: 22, top: 26, bottom: 34 })
+      .padding({ left: 22, right: 22, top: 26, bottom: 92 })
+      if (this.uiState.ready && this.uiState.screen !== 'review') {
+        Row({ space: 4 }) {
+          Button('今日').layoutWeight(1).height(52).onClick(() => this.refreshHome())
+          Button('题库').layoutWeight(1).height(52).onClick(() => { this.searchQuery = ''; this.showLibrary(); })
+          Button('添加').layoutWeight(1).height(52).onClick(() => { this.clearEditor(); this.uiState.screen = 'newMemory'; })
+          Button('设置').layoutWeight(1).height(52).onClick(() => this.showSettings())
+        }
+        .width('100%')
+        .padding({ left: 12, right: 12, top: 8, bottom: 8 })
+        .backgroundColor('#F7F5EF')
+        .align(Alignment.Bottom)
+      }
     }
     .width('100%')
     .height('100%')
