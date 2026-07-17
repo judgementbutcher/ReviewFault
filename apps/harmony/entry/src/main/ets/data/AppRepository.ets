@@ -667,7 +667,7 @@ export class AppRepository {
       const manifest: BackupManifest = {
         format: 'reviewfault-backup',
         version: 2,
-        appVersion: '0.2.0',
+        appVersion: '0.2.1',
         schemaVersion: 2,
         schedulerAbiVersion: 2,
         exportedAt: Math.floor(Date.now() / 1000),

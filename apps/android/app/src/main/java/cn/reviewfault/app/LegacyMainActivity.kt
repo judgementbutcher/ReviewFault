@@ -48,14 +48,23 @@ class LegacyMainActivity : Activity() {
         when (intent.getStringExtra(EXTRA_ROUTE)) {
             ROUTE_MATH -> askMathSourceAndPickImage()
             ROUTE_MEMORY -> showMemoryEditor()
-            ROUTE_BACKUP -> showSettings()
+            ROUTE_BACKUP -> showBackup()
             else -> showHome()
         }
     }
 
     @Suppress("OVERRIDE_DEPRECATION")
     override fun onBackPressed() {
-        showHome()
+        if (intent.hasExtra(EXTRA_ROUTE)) finishWithRefresh() else showHome()
+    }
+
+    private fun finishWithRefresh() {
+        setResult(RESULT_OK)
+        finish()
+    }
+
+    private fun returnToProductShell() {
+        if (intent.hasExtra(EXTRA_ROUTE)) finishWithRefresh() else showHome()
     }
 
     private fun showHome() {
@@ -286,7 +295,9 @@ class LegacyMainActivity : Activity() {
         AlertDialog.Builder(this)
             .setTitle("新建 408 记忆卡")
             .setView(scroll(body))
-            .setNegativeButton("取消", null)
+            .setNegativeButton("取消") { _, _ ->
+                if (intent.hasExtra(EXTRA_ROUTE)) finishWithRefresh()
+            }
             .setPositiveButton("保存", null)
             .create().also { dialog ->
                 dialog.setOnShowListener {
@@ -304,7 +315,7 @@ class LegacyMainActivity : Activity() {
                             )
                             dialog.dismiss()
                             Toast.makeText(this, "408 卡片已保存", Toast.LENGTH_SHORT).show()
-                            showHome()
+                            returnToProductShell()
                         } catch (error: IllegalArgumentException) {
                             Toast.makeText(this, error.message, Toast.LENGTH_LONG).show()
                         }
@@ -456,6 +467,29 @@ class LegacyMainActivity : Activity() {
         setContentView(scroll(content))
     }
 
+    private fun showBackup() {
+        val content = column().apply {
+            setPadding(dp(22), dp(30), dp(22), dp(34))
+            addView(text("数据与备份", 28, Color.rgb(30, 54, 43)).bold())
+            addView(text(
+                "数据只保存在你的设备上。建议定期导出完整备份。",
+                15, Color.DKGRAY,
+            ).withTop(6))
+            addView(sectionCard().apply {
+                addView(text("导出完整备份", 18, Color.rgb(30, 54, 43)).bold())
+                addView(text("包含题库、学习历史、算法状态和题面图片。", 14, Color.DKGRAY).withTop(6))
+                addView(primaryButton("选择保存位置") { createBackupDocument() }.withTop(14))
+            }.withTop(24))
+            addView(sectionCard().apply {
+                addView(text("从备份恢复", 18, Color.rgb(30, 54, 43)).bold())
+                addView(text("恢复会替换当前设备上的数据，操作前请先导出。", 14, Color.DKGRAY).withTop(6))
+                addView(outlineButton("选择 .reviewfault 文件") { chooseBackupToRestore() }.withTop(14))
+            }.withTop(14))
+            addView(outlineButton("完成") { finishWithRefresh() }.withTop(22))
+        }
+        setContentView(scroll(content))
+    }
+
     private fun showTrash() {
         val rows = database.search(LibraryFilter(deletedOnly = true))
         val content = column().apply {
@@ -520,7 +554,9 @@ class LegacyMainActivity : Activity() {
         AlertDialog.Builder(this)
             .setTitle("完善数学错题")
             .setView(scroll(body))
-            .setNegativeButton("取消", null)
+            .setNegativeButton("取消") { _, _ ->
+                if (intent.hasExtra(EXTRA_ROUTE)) finishWithRefresh()
+            }
             .setPositiveButton("保存") { _, _ ->
                 try {
                     database.updateMathDetails(
@@ -547,7 +583,9 @@ class LegacyMainActivity : Activity() {
         AlertDialog.Builder(this)
             .setTitle("编辑 408 记忆卡")
             .setView(scroll(body))
-            .setNegativeButton("取消", null)
+            .setNegativeButton("取消") { _, _ ->
+                if (intent.hasExtra(EXTRA_ROUTE)) finishWithRefresh()
+            }
             .setPositiveButton("保存") { _, _ ->
                 try {
                     database.updateMemoryCard(row.id, prompt.text.toString(), answer.text.toString())
@@ -584,7 +622,9 @@ class LegacyMainActivity : Activity() {
             .setTitle("数学错题快速录入")
             .setMessage("先保存题面，解答和错因可以复习后再补。")
             .setView(source)
-            .setNegativeButton("取消", null)
+            .setNegativeButton("取消") { _, _ ->
+                if (intent.hasExtra(EXTRA_ROUTE)) finishWithRefresh()
+            }
             .setPositiveButton("从相册选择") { _, _ ->
                 pendingMathSource = source.text.toString()
                 val intent = Intent(Intent.ACTION_OPEN_DOCUMENT).apply {
@@ -632,10 +672,12 @@ class LegacyMainActivity : Activity() {
             try {
                 database.createMathProblemFromImages(contentResolver, uris, pendingMathSource)
                 Toast.makeText(this, "${uris.size} 张题面已保存，稍后可直接重做", Toast.LENGTH_SHORT).show()
-                showHome()
+                returnToProductShell()
             } catch (error: Exception) {
                 Toast.makeText(this, error.message ?: "图片保存失败", Toast.LENGTH_LONG).show()
             }
+        } else if (requestCode == REQUEST_MATH_IMAGE) {
+            if (intent.hasExtra(EXTRA_ROUTE)) finishWithRefresh()
         } else if (requestCode == REQUEST_MATH_CAMERA) {
             val uri = pendingCaptureUri
             pendingCaptureUri = null
@@ -643,7 +685,7 @@ class LegacyMainActivity : Activity() {
                 try {
                     database.createMathProblemFromImage(contentResolver, uri, pendingMathSource)
                     Toast.makeText(this, "题面照片已保存，稍后可直接重做", Toast.LENGTH_SHORT).show()
-                    showHome()
+                    returnToProductShell()
                 } catch (error: Exception) {
                     Toast.makeText(this, error.message ?: "照片保存失败", Toast.LENGTH_LONG).show()
                 } finally {
@@ -651,6 +693,7 @@ class LegacyMainActivity : Activity() {
                 }
             } else if (uri != null) {
                 contentResolver.delete(uri, null, null)
+                if (intent.hasExtra(EXTRA_ROUTE)) finishWithRefresh()
             }
         } else if (requestCode == REQUEST_EXPORT_BACKUP && resultCode == RESULT_OK) {
             val uri = data?.data ?: return
@@ -667,7 +710,7 @@ class LegacyMainActivity : Activity() {
                 contentResolver.openInputStream(uri)?.use(database::restoreBackup)
                     ?: error("无法读取备份文件")
                 Toast.makeText(this, "数据已恢复", Toast.LENGTH_LONG).show()
-                showHome()
+                returnToProductShell()
             } catch (error: Exception) {
                 Toast.makeText(this, error.message ?: "恢复失败", Toast.LENGTH_LONG).show()
             }

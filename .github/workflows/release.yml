@@ -30,11 +30,11 @@ jobs:
       - uses: gradle/actions/setup-gradle@v4
       - run: ./gradlew :app:assembleDebug :app:lintDebug
         working-directory: apps/android
-      - run: cp apps/android/app/build/outputs/apk/debug/app-debug.apk ReviewFault-android-v0.2.0-debug.apk
+      - run: cp apps/android/app/build/outputs/apk/debug/app-debug.apk ReviewFault-android-v0.2.1-debug.apk
       - uses: actions/upload-artifact@v4
         with:
           name: android-release
-          path: ReviewFault-android-v0.2.0-debug.apk
+          path: ReviewFault-android-v0.2.1-debug.apk
 
   windows:
     runs-on: windows-2022
@@ -46,11 +46,11 @@ jobs:
       - uses: microsoft/setup-msbuild@v2
       - run: msbuild apps/windows/ReviewFault/ReviewFault.csproj -restore -p:Platform=x64 -p:Configuration=Release
       - shell: pwsh
-        run: Compress-Archive -Path apps/windows/ReviewFault/bin/x64/Release/* -DestinationPath ReviewFault-windows-v0.2.0-x64.zip
+        run: Compress-Archive -Path apps/windows/ReviewFault/bin/x64/Release/* -DestinationPath ReviewFault-windows-v0.2.1-x64.zip
       - uses: actions/upload-artifact@v4
         with:
           name: windows-release
-          path: ReviewFault-windows-v0.2.0-x64.zip
+          path: ReviewFault-windows-v0.2.1-x64.zip
 
   publish:
     needs: [core, android, windows]
@@ -61,12 +61,12 @@ jobs:
         with:
           pattern: '*-release'
           merge-multiple: true
-      - run: sha256sum ReviewFault-android-v0.2.0-debug.apk ReviewFault-windows-v0.2.0-x64.zip > SHA256SUMS
+      - run: sha256sum ReviewFault-android-v0.2.1-debug.apk ReviewFault-windows-v0.2.1-x64.zip > SHA256SUMS
       - uses: softprops/action-gh-release@v2
         with:
-          name: ReviewFault v0.2.0
-          body_path: docs/release-v0.2.0.md
+          name: ReviewFault v0.2.1
+          body_path: docs/release-v0.2.1.md
           files: |
-            ReviewFault-android-v0.2.0-debug.apk
-            ReviewFault-windows-v0.2.0-x64.zip
+            ReviewFault-android-v0.2.1-debug.apk
+            ReviewFault-windows-v0.2.1-x64.zip
             SHA256SUMS

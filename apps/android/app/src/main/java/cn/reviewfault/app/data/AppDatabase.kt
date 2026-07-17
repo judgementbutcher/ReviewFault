@@ -678,7 +678,7 @@ class AppDatabase private constructor(context: Context) :
         val manifest = JSONObject().apply {
             put("format", "reviewfault-backup")
             put("version", 2)
-            put("appVersion", "0.2.0")
+            put("appVersion", "0.2.1")
             put("schemaVersion", 2)
             put("schedulerAbiVersion", 2)
             put("exportedAt", Instant.now().epochSecond)
