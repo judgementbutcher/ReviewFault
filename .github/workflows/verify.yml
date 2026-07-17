@@ -45,7 +45,7 @@ jobs:
       - name: Annotate Android build errors
         if: failure()
         run: |
-          tail -120 apps/android/android-build.log | while IFS= read -r line; do
+          grep -E 'requires.*(compileSdk|AGP)|AAR metadata|Dependency |FAILURE:|What went wrong|e: file|error:|Could not resolve|BUILD FAILED' apps/android/android-build.log | while IFS= read -r line; do
             line="${line//'%'/'%25'}"
             line="${line//$'\r'/'%0D'}"
             line="${line//$'\n'/'%0A'}"
