@@ -45,8 +45,11 @@ jobs:
       - name: Annotate Android build errors
         if: failure()
         run: |
-          grep -E '(^| )e: |error:|FAILURE:|What went wrong' apps/android/android-build.log | head -80 | while IFS= read -r line; do
-            echo "::error::$line"
+          tail -120 apps/android/android-build.log | while IFS= read -r line; do
+            line="${line//'%'/'%25'}"
+            line="${line//$'\r'/'%0D'}"
+            line="${line//$'\n'/'%0A'}"
+            echo "::error title=Android build::$line"
           done
       - uses: actions/upload-artifact@v4
         if: success()

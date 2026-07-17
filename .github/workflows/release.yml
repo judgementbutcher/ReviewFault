@@ -8,6 +8,15 @@ permissions:
   contents: write
 
 jobs:
+  core:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - run: make test
+
   android:
     runs-on: ubuntu-24.04
     steps:
@@ -21,14 +30,11 @@ jobs:
       - uses: gradle/actions/setup-gradle@v4
       - run: ./gradlew :app:assembleDebug :app:lintDebug
         working-directory: apps/android
-      - run: |
-          cp apps/android/app/build/outputs/apk/debug/app-debug.apk ReviewFault-android-v0.2.0-debug.apk
-          sha256sum ReviewFault-android-v0.2.0-debug.apk > SHA256SUMS-android
-      - uses: softprops/action-gh-release@v2
+      - run: cp apps/android/app/build/outputs/apk/debug/app-debug.apk ReviewFault-android-v0.2.0-debug.apk
+      - uses: actions/upload-artifact@v4
         with:
-          files: |
-            ReviewFault-android-v0.2.0-debug.apk
-            SHA256SUMS-android
+          name: android-release
+          path: ReviewFault-android-v0.2.0-debug.apk
 
   windows:
     runs-on: windows-2022
@@ -40,11 +46,27 @@ jobs:
       - uses: microsoft/setup-msbuild@v2
       - run: msbuild apps/windows/ReviewFault/ReviewFault.csproj -restore -p:Platform=x64 -p:Configuration=Release
       - shell: pwsh
-        run: |
-          Compress-Archive -Path apps/windows/ReviewFault/bin/x64/Release/* -DestinationPath ReviewFault-windows-v0.2.0-x64.zip
-          (Get-FileHash ReviewFault-windows-v0.2.0-x64.zip -Algorithm SHA256).Hash.ToLower() + "  ReviewFault-windows-v0.2.0-x64.zip" | Set-Content SHA256SUMS-windows
+        run: Compress-Archive -Path apps/windows/ReviewFault/bin/x64/Release/* -DestinationPath ReviewFault-windows-v0.2.0-x64.zip
+      - uses: actions/upload-artifact@v4
+        with:
+          name: windows-release
+          path: ReviewFault-windows-v0.2.0-x64.zip
+
+  publish:
+    needs: [core, android, windows]
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: '*-release'
+          merge-multiple: true
+      - run: sha256sum ReviewFault-android-v0.2.0-debug.apk ReviewFault-windows-v0.2.0-x64.zip > SHA256SUMS
       - uses: softprops/action-gh-release@v2
         with:
+          name: ReviewFault v0.2.0
+          body_path: docs/release-v0.2.0.md
           files: |
+            ReviewFault-android-v0.2.0-debug.apk
             ReviewFault-windows-v0.2.0-x64.zip
-            SHA256SUMS-windows
+            SHA256SUMS
