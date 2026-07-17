@@ -7,6 +7,7 @@ import android.database.Cursor
 import android.database.sqlite.SQLiteDatabase
 import android.database.sqlite.SQLiteOpenHelper
 import android.net.Uri
+import cn.reviewfault.app.BuildConfig
 import cn.reviewfault.app.core.NativeScheduleResult
 import cn.reviewfault.app.core.NativeScheduler
 import java.io.File
@@ -116,24 +117,38 @@ class AppDatabase private constructor(context: Context) :
         readableDatabase.rawQuery(
             """
             SELECT
-              SUM(CASE WHEN scheduler_state <> 0 AND due_at < ? THEN 1 ELSE 0 END),
-              SUM(CASE WHEN scheduler_state <> 0 AND due_at BETWEEN ? AND ? THEN 1 ELSE 0 END),
-              SUM(CASE WHEN scheduler_state = 0 THEN 1 ELSE 0 END),
-              SUM(CASE
-                WHEN scheduler_state = 0 OR due_at <= ?
-                THEN CASE WHEN kind = 'math_problem' THEN 480 ELSE 45 END
-                ELSE 0 END)
-            FROM study_item
-            WHERE suspended_at IS NULL AND deleted_at IS NULL
+              COALESCE(SUM(CASE WHEN s.scheduler_state <> 0 AND s.due_at < ? THEN 1 ELSE 0 END), 0),
+              COALESCE(SUM(CASE WHEN s.scheduler_state <> 0 AND s.due_at BETWEEN ? AND ? THEN 1 ELSE 0 END), 0),
+              COALESCE(SUM(CASE WHEN s.scheduler_state = 0 AND s.kind = 'memory_card' THEN 1 ELSE 0 END), 0),
+              COALESCE(SUM(CASE WHEN s.scheduler_state = 0 AND s.kind = 'math_problem' THEN 1 ELSE 0 END), 0),
+              COALESCE(SUM(CASE WHEN s.scheduler_state <> 0 AND s.due_at <= ?
+                THEN CASE WHEN s.kind = 'math_problem' THEN 480 ELSE 45 END ELSE 0 END), 0),
+              lp.daily_new_memory_limit,
+              (SELECT COUNT(*) FROM review_event_v2 e
+               JOIN memory_review_event_v2 mr ON mr.review_event_id = e.id
+               WHERE mr.state_before = 0 AND e.reviewed_at >= ?)
+            FROM learning_preferences lp
+            LEFT JOIN study_item s ON s.suspended_at IS NULL AND s.deleted_at IS NULL AND (
+              (s.kind = 'math_problem' AND lp.include_math_problems = 1) OR
+              (s.kind = 'memory_card' AND lp.include_memory_cards = 1 AND (
+                (s.subject = 'data_structures' AND lp.enable_data_structures = 1) OR
+                (s.subject = 'computer_organization' AND lp.enable_computer_organization = 1) OR
+                (s.subject = 'operating_systems' AND lp.enable_operating_systems = 1) OR
+                (s.subject = 'computer_networks' AND lp.enable_computer_networks = 1))))
+            WHERE lp.singleton = 1
             """.trimIndent(),
-            arrayOf(dayStart.toString(), dayStart.toString(), now.toString(), now.toString()),
+            arrayOf(dayStart.toString(), dayStart.toString(), now.toString(), now.toString(),
+                dayStart.toString()),
         ).use { cursor ->
             cursor.moveToFirst()
+            val remainingNewMemory = (cursor.getInt(5) - cursor.getInt(6)).coerceAtLeast(0)
+            val newMemory = cursor.intOrZero(2).coerceAtMost(remainingNewMemory)
+            val newMath = cursor.intOrZero(3)
             return DashboardSummary(
                 cursor.intOrZero(0),
                 cursor.intOrZero(1),
-                cursor.intOrZero(2),
-                (cursor.intOrZero(3) + 59) / 60,
+                newMemory + newMath,
+                (cursor.intOrZero(4) + newMemory * 45 + newMath * 480 + 59) / 60,
             )
         }
     }
@@ -158,13 +173,21 @@ class AppDatabase private constructor(context: Context) :
             LEFT JOIN math_problem_media pm
               ON pm.math_problem_id = s.id AND pm.role = 'prompt' AND pm.sort_order = 0
             LEFT JOIN media ON media.id = pm.media_id
+            CROSS JOIN learning_preferences lp
             WHERE s.suspended_at IS NULL AND s.deleted_at IS NULL
+              AND lp.singleton = 1
+              AND ((s.kind = 'math_problem' AND lp.include_math_problems = 1) OR
+                (s.kind = 'memory_card' AND lp.include_memory_cards = 1 AND (
+                  (s.subject = 'data_structures' AND lp.enable_data_structures = 1) OR
+                  (s.subject = 'computer_organization' AND lp.enable_computer_organization = 1) OR
+                  (s.subject = 'operating_systems' AND lp.enable_operating_systems = 1) OR
+                  (s.subject = 'computer_networks' AND lp.enable_computer_networks = 1))))
               AND ((s.scheduler_state <> 0 AND s.due_at <= ?)
                 OR (s.scheduler_state = 0 AND (s.kind = 'math_problem' OR (
                   SELECT COUNT(*) FROM review_event_v2 e
-                  JOIN memory_review_event_v2 m ON m.review_event_id = e.id
-                  WHERE m.state_before = 0 AND e.reviewed_at >= ?
-                ) < (SELECT daily_new_memory_limit FROM learning_preferences WHERE singleton = 1))))
+                  JOIN memory_review_event_v2 mr ON mr.review_event_id = e.id
+                  WHERE mr.state_before = 0 AND e.reviewed_at >= ?
+                ) < lp.daily_new_memory_limit)))
             ORDER BY
               CASE WHEN s.scheduler_state <> 0 AND s.due_at < ? THEN 0
                    WHEN s.scheduler_state <> 0 THEN 1 ELSE 2 END,
@@ -292,7 +315,7 @@ class AppDatabase private constructor(context: Context) :
         val placeholders = itemIds.joinToString { "?" }
         writableDatabase.execSQL(
             "UPDATE study_item SET deleted_at = ?, updated_at = ? WHERE deleted_at IS NULL AND id IN ($placeholders)",
-            arrayOf(now, now, *itemIds.toTypedArray()),
+            arrayOf<Any>(now, now, *itemIds.toTypedArray()),
         )
         return DeletionState(itemIds, now, now + 10)
     }
@@ -303,7 +326,7 @@ class AppDatabase private constructor(context: Context) :
         val placeholders = itemIds.joinToString { "?" }
         writableDatabase.execSQL(
             "UPDATE study_item SET deleted_at = NULL, updated_at = ? WHERE id IN ($placeholders)",
-            arrayOf(now, *itemIds.toTypedArray()),
+            arrayOf<Any>(now, *itemIds.toTypedArray()),
         )
     }
 
@@ -320,7 +343,7 @@ class AppDatabase private constructor(context: Context) :
                         put("id", id); put("name", name); put("created_at", now); put("updated_at", now)
                     })
                 }
-                execSQL("UPDATE tag SET deleted_at = NULL, updated_at = ? WHERE id = ?", arrayOf(now, tagId))
+                execSQL("UPDATE tag SET deleted_at = NULL, updated_at = ? WHERE id = ?", arrayOf<Any>(now, tagId))
                 insertOrThrow("study_item_tag", null, ContentValues().apply {
                     put("study_item_id", itemId); put("tag_id", tagId)
                 })
@@ -582,15 +605,15 @@ class AppDatabase private constructor(context: Context) :
             execSQL("""UPDATE schedule_state_v2 SET due_at = ?, last_reviewed_at = ?,
                 repetitions = ?, needs_history_replay = 0, updated_at = ?
                 WHERE study_item_id = ?""",
-                arrayOf(result.dueAt, reviewedAt, result.repetitions, now, row.id))
+                arrayOf<Any>(result.dueAt, reviewedAt, result.repetitions, now, row.id))
             if (row.kind == "memory_card") {
                 execSQL("""UPDATE memory_schedule_state SET state = ?, difficulty = ?,
                     stability_days = ?, lapses = ? WHERE study_item_id = ?""",
-                    arrayOf(result.state, result.difficulty, result.stabilityDays, result.lapses, row.id))
+                    arrayOf<Any>(result.state, result.difficulty, result.stabilityDays, result.lapses, row.id))
             } else {
                 execSQL("""UPDATE math_schedule_state SET mastery_level = ?, fluent_streak = ?
                     WHERE study_item_id = ?""",
-                    arrayOf(mathNative!!.masteryLevel, mathNative!!.fluentStreak, row.id))
+                    arrayOf<Any>(mathNative!!.masteryLevel, mathNative!!.fluentStreak, row.id))
             }
 
             val eventId = uuidV7()
@@ -678,7 +701,7 @@ class AppDatabase private constructor(context: Context) :
         val manifest = JSONObject().apply {
             put("format", "reviewfault-backup")
             put("version", 2)
-            put("appVersion", "0.2.1")
+            put("appVersion", BuildConfig.VERSION_NAME)
             put("schemaVersion", 2)
             put("schedulerAbiVersion", 2)
             put("exportedAt", Instant.now().epochSecond)
@@ -700,17 +723,37 @@ class AppDatabase private constructor(context: Context) :
         val restoreRoot = File(appContext.cacheDir, "restore-${UUID.randomUUID()}")
         check(restoreRoot.mkdirs()) { "无法创建恢复临时目录" }
         try {
+            val extractedFiles = mutableSetOf<String>()
+            var extractedBytes = 0L
+            var entryCount = 0
             ZipInputStream(input.buffered()).use { zip ->
                 while (true) {
                     val entry = zip.nextEntry ?: break
-                    val destination = File(restoreRoot, entry.name)
+                    entryCount++
+                    require(entryCount <= MAX_BACKUP_ENTRIES) { "备份文件数量过多，已拒绝恢复" }
+                    val entryName = entry.name.replace('\\', '/')
+                    require(entryName == "manifest.json" || entryName == "database.sqlite" ||
+                        entryName.startsWith("media/")) { "备份包含未知文件：$entryName" }
+                    val destination = File(restoreRoot, entryName)
                     val safeRoot = restoreRoot.canonicalPath + File.separator
                     require(destination.canonicalPath.startsWith(safeRoot)) { "备份包含非法路径" }
                     if (entry.isDirectory) {
                         destination.mkdirs()
                     } else {
+                        require(extractedFiles.add(entryName)) { "备份包含重复文件：$entryName" }
                         destination.parentFile?.mkdirs()
-                        destination.outputStream().use { zip.copyTo(it) }
+                        destination.outputStream().buffered().use { output ->
+                            val buffer = ByteArray(DEFAULT_BUFFER_SIZE)
+                            while (true) {
+                                val count = zip.read(buffer)
+                                if (count < 0) break
+                                extractedBytes += count
+                                require(extractedBytes <= MAX_BACKUP_BYTES) {
+                                    "备份解压后超过 2 GiB，已拒绝恢复"
+                                }
+                                output.write(buffer, 0, count)
+                            }
+                        }
                     }
                     zip.closeEntry()
                 }
@@ -725,12 +768,28 @@ class AppDatabase private constructor(context: Context) :
                     (backupVersion == 2 && schemaVersion == 2 && abiVersion == 2))
             ) { "不是受支持的 ReviewFault 备份" }
             val listed = manifest.getJSONArray("files")
+            val listedFiles = mutableSetOf<String>()
+            var listedBytes = 0L
             for (index in 0 until listed.length()) {
                 val item = listed.getJSONObject(index)
-                val file = File(restoreRoot, item.getString("path"))
-                require(file.isFile && file.length() == item.getLong("bytes") &&
+                val relative = item.getString("path")
+                require(relative == "database.sqlite" || relative.startsWith("media/")) {
+                    "备份清单包含非法路径"
+                }
+                require(listedFiles.add(relative)) { "备份清单包含重复文件：$relative" }
+                val bytes = item.getLong("bytes")
+                require(bytes >= 0) { "备份清单包含非法文件大小" }
+                listedBytes += bytes
+                require(listedBytes <= MAX_BACKUP_BYTES) { "备份清单超过 2 GiB，已拒绝恢复" }
+                val file = File(restoreRoot, relative)
+                val safeRoot = restoreRoot.canonicalPath + File.separator
+                require(file.canonicalPath.startsWith(safeRoot) && file.isFile &&
+                    file.length() == bytes &&
                     sha256(file) == item.getString("sha256")
-                ) { "备份文件校验失败：${item.getString("path")}" }
+                ) { "备份文件校验失败：$relative" }
+            }
+            require(extractedFiles == listedFiles + "manifest.json") {
+                "备份包含未在清单中声明的文件"
             }
             val restoredDatabase = File(restoreRoot, "database.sqlite")
             require(restoredDatabase.isFile) { "备份缺少数据库" }
@@ -808,6 +867,8 @@ class AppDatabase private constructor(context: Context) :
     )
 
     companion object {
+        private const val MAX_BACKUP_BYTES = 2L * 1024 * 1024 * 1024
+        private const val MAX_BACKUP_ENTRIES = 10_000
         private val MEMORY_TEMPLATES = setOf(
             "qa", "cloze", "layered_hint", "enumeration", "image_occlusion", "comparison",
         )

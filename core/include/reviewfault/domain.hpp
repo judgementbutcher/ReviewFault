@@ -138,6 +138,8 @@ struct QueueCandidate {
 struct QueuePlanConfig {
   std::int64_t now = 0;
   std::int64_t local_day_start_utc = 0;
+  // Applies to new 408 memory cards. New math problems remain available for
+  // deliberate rework and are not consumed by this daily learning limit.
   std::uint32_t new_item_limit = 20;
   // Zero means no time-budget filtering.
   std::uint32_t available_seconds = 0;

@@ -118,20 +118,35 @@ export class AppRepository {
   async dashboard(now: number, dayStart: number): Promise<DashboardSummary> {
     const result = await this.requiredStore().querySql(`
       SELECT
-        COALESCE(SUM(CASE WHEN scheduler_state <> 0 AND due_at < ? THEN 1 ELSE 0 END), 0),
-        COALESCE(SUM(CASE WHEN scheduler_state <> 0 AND due_at BETWEEN ? AND ? THEN 1 ELSE 0 END), 0),
-        COALESCE(SUM(CASE WHEN scheduler_state = 0 THEN 1 ELSE 0 END), 0),
-        COALESCE(SUM(CASE WHEN scheduler_state = 0 OR due_at <= ?
-          THEN CASE WHEN kind = 'math_problem' THEN 480 ELSE 45 END ELSE 0 END), 0)
-      FROM study_item
-      WHERE suspended_at IS NULL AND deleted_at IS NULL
-    `, [dayStart, dayStart, now, now]);
+        COALESCE(SUM(CASE WHEN s.scheduler_state <> 0 AND s.due_at < ? THEN 1 ELSE 0 END), 0),
+        COALESCE(SUM(CASE WHEN s.scheduler_state <> 0 AND s.due_at BETWEEN ? AND ? THEN 1 ELSE 0 END), 0),
+        COALESCE(SUM(CASE WHEN s.scheduler_state = 0 AND s.kind = 'memory_card' THEN 1 ELSE 0 END), 0),
+        COALESCE(SUM(CASE WHEN s.scheduler_state = 0 AND s.kind = 'math_problem' THEN 1 ELSE 0 END), 0),
+        COALESCE(SUM(CASE WHEN s.scheduler_state <> 0 AND s.due_at <= ?
+          THEN CASE WHEN s.kind = 'math_problem' THEN 480 ELSE 45 END ELSE 0 END), 0),
+        lp.daily_new_memory_limit,
+        (SELECT COUNT(*) FROM review_event_v2 e
+         JOIN memory_review_event_v2 mr ON mr.review_event_id = e.id
+         WHERE mr.state_before = 0 AND e.reviewed_at >= ?)
+      FROM learning_preferences lp
+      LEFT JOIN study_item s ON s.suspended_at IS NULL AND s.deleted_at IS NULL AND (
+        (s.kind = 'math_problem' AND lp.include_math_problems = 1) OR
+        (s.kind = 'memory_card' AND lp.include_memory_cards = 1 AND (
+          (s.subject = 'data_structures' AND lp.enable_data_structures = 1) OR
+          (s.subject = 'computer_organization' AND lp.enable_computer_organization = 1) OR
+          (s.subject = 'operating_systems' AND lp.enable_operating_systems = 1) OR
+          (s.subject = 'computer_networks' AND lp.enable_computer_networks = 1))))
+      WHERE lp.singleton = 1
+    `, [dayStart, dayStart, now, now, dayStart]);
     result.goToFirstRow();
+    const remainingNewMemory = Math.max(0, result.getLong(5) - result.getLong(6));
+    const newMemory = Math.min(result.getLong(2), remainingNewMemory);
+    const newMath = result.getLong(3);
     const summary: DashboardSummary = {
       overdue: result.getLong(0),
       dueToday: result.getLong(1),
-      newItems: result.getLong(2),
-      estimatedMinutes: Math.floor((result.getLong(3) + 59) / 60),
+      newItems: newMemory + newMath,
+      estimatedMinutes: Math.floor((result.getLong(4) + newMemory * 45 + newMath * 480 + 59) / 60),
     };
     result.close();
     return summary;
@@ -157,13 +172,21 @@ export class AppRepository {
       LEFT JOIN math_problem_media pm
         ON pm.math_problem_id = s.id AND pm.role = 'prompt' AND pm.sort_order = 0
       LEFT JOIN media ON media.id = pm.media_id
+      CROSS JOIN learning_preferences lp
       WHERE s.suspended_at IS NULL AND s.deleted_at IS NULL
+        AND lp.singleton = 1
+        AND ((s.kind = 'math_problem' AND lp.include_math_problems = 1) OR
+          (s.kind = 'memory_card' AND lp.include_memory_cards = 1 AND (
+            (s.subject = 'data_structures' AND lp.enable_data_structures = 1) OR
+            (s.subject = 'computer_organization' AND lp.enable_computer_organization = 1) OR
+            (s.subject = 'operating_systems' AND lp.enable_operating_systems = 1) OR
+            (s.subject = 'computer_networks' AND lp.enable_computer_networks = 1))))
         AND ((s.scheduler_state <> 0 AND s.due_at <= ?)
           OR (s.scheduler_state = 0 AND (s.kind = 'math_problem' OR (
             SELECT COUNT(*) FROM review_event_v2 e
-            JOIN memory_review_event_v2 m ON m.review_event_id = e.id
-            WHERE m.state_before = 0 AND e.reviewed_at >= ?
-          ) < (SELECT daily_new_memory_limit FROM learning_preferences WHERE singleton = 1))))
+            JOIN memory_review_event_v2 mr ON mr.review_event_id = e.id
+            WHERE mr.state_before = 0 AND e.reviewed_at >= ?
+          ) < lp.daily_new_memory_limit)))
       ORDER BY
         CASE WHEN s.scheduler_state <> 0 AND s.due_at < ? THEN 0
              WHEN s.scheduler_state <> 0 THEN 1 ELSE 2 END,
@@ -667,7 +690,7 @@ export class AppRepository {
       const manifest: BackupManifest = {
         format: 'reviewfault-backup',
         version: 2,
-        appVersion: '0.2.1',
+        appVersion: '0.2.2',
         schemaVersion: 2,
         schedulerAbiVersion: 2,
         exportedAt: Math.floor(Date.now() / 1000),
@@ -725,10 +748,30 @@ export class AppRepository {
       if (manifest.format !== 'reviewfault-backup' || (!compatibleV1 && !compatibleV2)) {
         throw new Error('不是受支持的 ReviewFault 备份');
       }
+      const extractedFiles = AppRepository.walkFiles(extracted, '');
+      if (extractedFiles.length > 10000) throw new Error('备份文件数量过多，已拒绝恢复');
+      const extractedSet = new Set<string>();
+      for (let index = 0; index < extractedFiles.length; index++) {
+        const relative = extractedFiles[index];
+        if (relative !== 'manifest.json' && !AppRepository.isSafeBackupPath(relative)) {
+          throw new Error(`备份包含未知文件：${relative}`);
+        }
+        if (extractedSet.has(relative)) throw new Error(`备份包含重复文件：${relative}`);
+        extractedSet.add(relative);
+      }
+      const listedSet = new Set<string>();
+      let listedBytes = 0;
       for (let index = 0; index < manifest.files.length; index++) {
         const listed = manifest.files[index];
         if (!AppRepository.isSafeBackupPath(listed.path)) {
           throw new Error('备份包含非法路径');
+        }
+        if (listedSet.has(listed.path)) throw new Error(`备份清单包含重复文件：${listed.path}`);
+        listedSet.add(listed.path);
+        if (listed.bytes < 0) throw new Error('备份清单包含非法文件大小');
+        listedBytes += listed.bytes;
+        if (listedBytes > 2 * 1024 * 1024 * 1024) {
+          throw new Error('备份清单超过 2 GiB，已拒绝恢复');
         }
         const filePath = `${extracted}/${listed.path}`;
         if (!fs.accessSync(filePath) || fs.statSync(filePath).size !== listed.bytes ||
@@ -736,6 +779,13 @@ export class AppRepository {
           throw new Error(`备份文件校验失败：${listed.path}`);
         }
       }
+      listedSet.add('manifest.json');
+      if (listedSet.size !== extractedSet.size) {
+        throw new Error('备份包含未在清单中声明的文件');
+      }
+      listedSet.forEach((relative: string) => {
+        if (!extractedSet.has(relative)) throw new Error('备份缺少清单中声明的文件');
+      });
       const restoredDatabase = `${extracted}/database.sqlite`;
       if (!fs.accessSync(restoredDatabase)) throw new Error('备份缺少数据库');
 

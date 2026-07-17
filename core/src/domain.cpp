@@ -253,7 +253,7 @@ QueuePlan plan_queue(const std::vector<QueueCandidate>& candidates,
   interleave_math_chapters(fresh);
 
   QueuePlan plan;
-  std::uint32_t used_new = 0;
+  std::uint32_t used_new_memory = 0;
   auto try_append = [&](const PlannedItem& planned, bool is_new) {
     const auto estimate = effective_estimate(planned.item);
     const bool exceeds_budget =
@@ -276,14 +276,15 @@ QueuePlan plan_queue(const std::vector<QueueCandidate>& candidates,
     try_append(item, false);
   }
   for (const auto& item : fresh) {
-    if (used_new >= config.new_item_limit) {
+    const bool consumes_limit = item.item.kind == StudyKind::MemoryCard;
+    if (consumes_limit && used_new_memory >= config.new_item_limit) {
       ++plan.omitted_new_count;
       continue;
     }
     const auto before = plan.items.size();
     try_append(item, true);
-    if (plan.items.size() != before) {
-      ++used_new;
+    if (consumes_limit && plan.items.size() != before) {
+      ++used_new_memory;
     }
   }
   return plan;

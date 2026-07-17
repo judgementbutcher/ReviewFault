@@ -13,8 +13,8 @@ android {
         applicationId = "cn.reviewfault.app"
         minSdk = 26
         targetSdk = 35
-        versionCode = 3
-        versionName = "0.2.1"
+        versionCode = 4
+        versionName = "0.2.2"
 
         externalNativeBuild {
             cmake {
@@ -47,6 +47,26 @@ android {
     }
 
     sourceSets["main"].assets.srcDir("../../../schema/migrations")
+
+    lint {
+        // These versions are kept aligned with the 2024.12 Compose BOM and
+        // compileSdk 35 for this release; dependency upgrades are handled as a set.
+        disable += "GradleDependency"
+    }
+
+    val releaseSigningValues = listOf(
+        "ANDROID_KEYSTORE_PATH", "ANDROID_KEYSTORE_PASSWORD",
+        "ANDROID_KEY_ALIAS", "ANDROID_KEY_PASSWORD",
+    ).associateWith { System.getenv(it) }
+    if (releaseSigningValues.values.all { !it.isNullOrBlank() }) {
+        signingConfigs.create("release") {
+            storeFile = file(releaseSigningValues.getValue("ANDROID_KEYSTORE_PATH")!!)
+            storePassword = releaseSigningValues.getValue("ANDROID_KEYSTORE_PASSWORD")
+            keyAlias = releaseSigningValues.getValue("ANDROID_KEY_ALIAS")
+            keyPassword = releaseSigningValues.getValue("ANDROID_KEY_PASSWORD")
+        }
+        buildTypes.getByName("release").signingConfig = signingConfigs.getByName("release")
+    }
 }
 
 dependencies {

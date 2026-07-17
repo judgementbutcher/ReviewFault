@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.20)
-project(ReviewFaultCore VERSION 0.2.0 LANGUAGES CXX)
+project(ReviewFaultCore VERSION 0.2.2 LANGUAGES CXX)
 
 add_library(reviewfault_core
   core/src/domain.cpp
@@ -31,4 +31,11 @@ if(REVIEWFAULT_BUILD_TESTS)
   add_executable(reviewfault_v2_scheduler_tests core/tests/scheduler_v2_test.cpp)
   target_link_libraries(reviewfault_v2_scheduler_tests PRIVATE reviewfault_core)
   add_test(NAME reviewfault_v2_scheduler_tests COMMAND reviewfault_v2_scheduler_tests)
+
+  # Golden fixtures live in the source tree; make out-of-tree CTest runs
+  # behave the same way as the Makefile test entry point.
+  set_tests_properties(
+    reviewfault_core_tests reviewfault_domain_tests reviewfault_v2_scheduler_tests
+    PROPERTIES WORKING_DIRECTORY "${CMAKE_SOURCE_DIR}"
+  )
 endif()

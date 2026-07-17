@@ -7,7 +7,6 @@ import android.app.PendingIntent
 import android.content.BroadcastReceiver
 import android.content.Context
 import android.content.Intent
-import android.os.Build
 import cn.reviewfault.app.data.AppDatabase
 import java.time.LocalDateTime
 import java.time.ZoneId
@@ -42,11 +41,9 @@ class ReminderReceiver : BroadcastReceiver() {
         val summary = AppDatabase.get(context).dashboard(now, start)
         if (summary.overdue + summary.dueToday == 0) return
         val manager = context.getSystemService(NotificationManager::class.java)
-        if (Build.VERSION.SDK_INT >= 26) {
-            manager.createNotificationChannel(NotificationChannel(
-                "study-reminders", "学习提醒", NotificationManager.IMPORTANCE_DEFAULT,
-            ))
-        }
+        manager.createNotificationChannel(NotificationChannel(
+            "study-reminders", "学习提醒", NotificationManager.IMPORTANCE_DEFAULT,
+        ))
         val launch = PendingIntent.getActivity(
             context, 0, Intent(context, MainActivity::class.java),
             PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE,

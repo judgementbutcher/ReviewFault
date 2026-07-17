@@ -44,9 +44,10 @@ import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.automirrored.filled.ArrowForward
+import androidx.compose.material.icons.automirrored.filled.LibraryBooks
 import androidx.compose.material.icons.filled.Add
 import androidx.compose.material.icons.filled.AddCircle
-import androidx.compose.material.icons.filled.ArrowForward
 import androidx.compose.material.icons.filled.Backup
 import androidx.compose.material.icons.filled.CheckCircle
 import androidx.compose.material.icons.filled.Close
@@ -55,7 +56,6 @@ import androidx.compose.material.icons.filled.DeleteOutline
 import androidx.compose.material.icons.filled.ExpandMore
 import androidx.compose.material.icons.filled.Home
 import androidx.compose.material.icons.filled.Image
-import androidx.compose.material.icons.filled.LibraryBooks
 import androidx.compose.material.icons.filled.Notifications
 import androidx.compose.material.icons.filled.Psychology
 import androidx.compose.material.icons.filled.Restore
@@ -196,7 +196,7 @@ private fun ReviewFaultApp(state: AppUiState, model: AppViewModel) {
         state.message?.let { message ->
             val result = snackbar.showSnackbar(message, if (state.deletion != null) "撤销" else null)
             if (result == androidx.compose.material3.SnackbarResult.ActionPerformed) model.undoDeletion()
-            model.clearMessage()
+            model.clearMessage(message)
         }
     }
     Scaffold(
@@ -232,7 +232,7 @@ private fun ReviewFaultApp(state: AppUiState, model: AppViewModel) {
 private fun AppNavigation(selected: AppDestination, navigate: (AppDestination) -> Unit) {
     val destinations = listOf(
         Triple(AppDestination.Today, "今日", Icons.Default.Home),
-        Triple(AppDestination.Library, "题库", Icons.Default.LibraryBooks),
+        Triple(AppDestination.Library, "题库", Icons.AutoMirrored.Filled.LibraryBooks),
         Triple(AppDestination.Add, "添加", Icons.Default.AddCircle),
         Triple(AppDestination.Settings, "设置", Icons.Default.Settings),
     )
@@ -309,7 +309,7 @@ private fun TodayScreen(state: AppUiState, model: AppViewModel) = Page {
             ) {
                 Text(if (total == 0) "添加第一条内容" else "开始今日复习")
                 Spacer(Modifier.width(8.dp))
-                Icon(if (total == 0) Icons.Default.Add else Icons.Default.ArrowForward, contentDescription = null, Modifier.size(19.dp))
+                Icon(if (total == 0) Icons.Default.Add else Icons.AutoMirrored.Filled.ArrowForward, contentDescription = null, Modifier.size(19.dp))
             }
         }
     }
@@ -330,7 +330,7 @@ private fun TodayScreen(state: AppUiState, model: AppViewModel) = Page {
                 )
             }
             IconButton(onClick = { model.navigate(AppDestination.Settings) }) {
-                Icon(Icons.Default.ArrowForward, contentDescription = "调整学习节奏")
+                Icon(Icons.AutoMirrored.Filled.ArrowForward, contentDescription = "调整学习节奏")
             }
         }
     }
@@ -370,10 +370,11 @@ private fun LibraryScreen(state: AppUiState, model: AppViewModel) {
         }
         item {
             Row(Modifier.fillMaxWidth().horizontalScroll(rememberScrollState()), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                FilterChip(selected = false, onClick = { model.setLibraryFilter() }, label = { Text("全部") })
-                FilterChip(selected = false, onClick = { model.setLibraryFilter(kind = "memory_card") }, label = { Text("408") })
-                FilterChip(selected = false, onClick = { model.setLibraryFilter(kind = "math_problem") }, label = { Text("数学") })
-                FilterChip(selected = false, onClick = { model.setLibraryFilter(status = "due") }, label = { Text("待复习") })
+                val filter = state.libraryFilter
+                FilterChip(selected = filter.kinds.isEmpty() && filter.status == "all", onClick = { model.setLibraryFilter() }, label = { Text("全部") })
+                FilterChip(selected = filter.kinds == setOf("memory_card"), onClick = { model.setLibraryFilter(kind = "memory_card") }, label = { Text("408") })
+                FilterChip(selected = filter.kinds == setOf("math_problem"), onClick = { model.setLibraryFilter(kind = "math_problem") }, label = { Text("数学") })
+                FilterChip(selected = filter.status == "due", onClick = { model.setLibraryFilter(status = "due") }, label = { Text("待复习") })
             }
         }
         item {
@@ -433,7 +434,7 @@ private fun EmptyLibrary(onAdd: () -> Unit) {
         verticalArrangement = Arrangement.spacedBy(12.dp),
     ) {
         Surface(shape = RoundedCornerShape(20.dp), color = MaterialTheme.colorScheme.primaryContainer) {
-            Icon(Icons.Default.LibraryBooks, null, Modifier.padding(16.dp).size(34.dp), tint = MaterialTheme.colorScheme.primary)
+            Icon(Icons.AutoMirrored.Filled.LibraryBooks, null, Modifier.padding(16.dp).size(34.dp), tint = MaterialTheme.colorScheme.primary)
         }
         Text("题库还是空的", style = MaterialTheme.typography.titleLarge)
         Text("从一道数学错题或一张 408 记忆卡开始。", color = MaterialTheme.colorScheme.onSurfaceVariant)
@@ -492,7 +493,7 @@ private fun AddChoiceCard(icon: ImageVector, title: String, subtitle: String, ac
                 Text(title, style = MaterialTheme.typography.titleLarge)
                 Text(subtitle, color = MaterialTheme.colorScheme.onSurfaceVariant, style = MaterialTheme.typography.bodyMedium)
             }
-            Icon(Icons.Default.ArrowForward, contentDescription = null, tint = MaterialTheme.colorScheme.onSurfaceVariant)
+            Icon(Icons.AutoMirrored.Filled.ArrowForward, contentDescription = null, tint = MaterialTheme.colorScheme.onSurfaceVariant)
         }
     }
 }
@@ -503,6 +504,9 @@ private fun SettingsScreen(state: AppUiState, model: AppViewModel) {
     var minutes by remember(state.preferences) { mutableStateOf(state.preferences.sessionMinutes.toString()) }
     var memoryPreset by remember(state.preferences) { mutableStateOf(state.preferences.memoryPreset) }
     var mathIntensity by remember(state.preferences) { mutableStateOf(state.preferences.mathIntensity) }
+    var includeMemory by remember(state.preferences) { mutableStateOf(state.preferences.includeMemoryCards) }
+    var includeMath by remember(state.preferences) { mutableStateOf(state.preferences.includeMathProblems) }
+    var subjects by remember(state.preferences) { mutableStateOf(state.preferences.enabledSubjects) }
     var theme by remember(state.themeMode) { mutableIntStateOf(state.themeMode) }
     var reminder by remember(state.reminderEnabled) { mutableStateOf(state.reminderEnabled) }
     var time by remember(state.reminderTime) { mutableStateOf(state.reminderTime) }
@@ -523,6 +527,24 @@ private fun SettingsScreen(state: AppUiState, model: AppViewModel) {
             SettingsSection("学习计划", "新内容上限、时长与算法节奏", Icons.Default.Tune, initiallyExpanded = true) {
                 OutlinedTextField(newLimit, { newLimit = it }, label = { Text("每日新 408 上限") }, singleLine = true, modifier = Modifier.fillMaxWidth())
                 OutlinedTextField(minutes, { minutes = it }, label = { Text("单次学习时长（分钟）") }, singleLine = true, modifier = Modifier.fillMaxWidth())
+                PreferenceSwitch("包含 408 记忆卡", includeMemory,
+                    enabled = includeMath || !includeMemory) { includeMemory = it }
+                PreferenceSwitch("包含数学错题", includeMath,
+                    enabled = includeMemory || !includeMath) { includeMath = it }
+                AnimatedVisibility(includeMemory) {
+                    MultiChoiceRow(
+                        "启用的 408 科目",
+                        listOf(
+                            "data_structures" to "数据结构",
+                            "computer_organization" to "组成原理",
+                            "operating_systems" to "操作系统",
+                            "computer_networks" to "计算机网络",
+                        ), subjects,
+                    ) { subject ->
+                        subjects = if (subject in subjects && subjects.size > 1) subjects - subject
+                        else subjects + subject
+                    }
+                }
                 ChoiceRow("408 节奏", listOf("time_saving" to "省时", "balanced" to "均衡", "reinforced" to "强化"), memoryPreset) { memoryPreset = it }
                 ChoiceRow("数学节奏", listOf("intensive" to "密集", "balanced" to "均衡", "relaxed" to "舒缓"), mathIntensity) { mathIntensity = it }
             }
@@ -585,10 +607,14 @@ private fun SettingsScreen(state: AppUiState, model: AppViewModel) {
                             sessionMinutes = minutes.toIntOrNull() ?: 0,
                             memoryPreset = memoryPreset,
                             mathIntensity = mathIntensity,
+                            enabledSubjects = subjects,
+                            includeMemoryCards = includeMemory,
+                            includeMathProblems = includeMath,
                         ), theme, reminder, time,
                     )
                 },
                 modifier = Modifier.fillMaxWidth().height(54.dp),
+                enabled = !state.operationInProgress,
                 shape = RoundedCornerShape(17.dp),
             ) { Text("保存更改") }
         }
@@ -641,6 +667,36 @@ private fun ChoiceRow(title: String, choices: List<Pair<String, String>>, select
                 FilterChip(selected = selected == value, onClick = { choose(value) }, label = { Text(label) })
             }
         }
+    }
+}
+
+@Composable
+private fun MultiChoiceRow(
+    title: String,
+    choices: List<Pair<String, String>>,
+    selected: Set<String>,
+    choose: (String) -> Unit,
+) {
+    Column(verticalArrangement = Arrangement.spacedBy(7.dp)) {
+        Text(title, style = MaterialTheme.typography.titleMedium)
+        Row(Modifier.fillMaxWidth().horizontalScroll(rememberScrollState()), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+            choices.forEach { (value, label) ->
+                FilterChip(selected = value in selected, onClick = { choose(value) }, label = { Text(label) })
+            }
+        }
+    }
+}
+
+@Composable
+private fun PreferenceSwitch(
+    label: String,
+    checked: Boolean,
+    enabled: Boolean = true,
+    update: (Boolean) -> Unit,
+) {
+    Row(Modifier.fillMaxWidth().height(48.dp), verticalAlignment = Alignment.CenterVertically) {
+        Text(label, Modifier.weight(1f), style = MaterialTheme.typography.bodyLarge)
+        Switch(checked = checked, onCheckedChange = update, enabled = enabled)
     }
 }
 
@@ -723,7 +779,7 @@ private fun ReviewScreen(state: AppUiState, model: AppViewModel) {
                         "做错" to { model.score(1, "wrong", reason, shownHints > 0) },
                         "勉强" to { model.score(2, "effortful", hintRevealed = shownHints > 0) },
                         "熟练" to { model.score(4, "fluent", hintRevealed = shownHints > 0) },
-                    ))
+                    ), enabled = !state.operationInProgress)
                 }
             } else {
                 item {
@@ -732,13 +788,14 @@ private fun ReviewScreen(state: AppUiState, model: AppViewModel) {
                         "困难" to { model.score(2, null, hintRevealed = shownHints > 0) },
                         "正确" to { model.score(3, null, hintRevealed = shownHints > 0) },
                         "轻松" to { model.score(4, null, hintRevealed = shownHints > 0) },
-                    ))
+                    ), enabled = !state.operationInProgress)
                 }
             }
         }
         item {
             OutlinedButton(
                 onClick = model::deleteCurrentWithoutReview,
+                enabled = !state.operationInProgress,
                 modifier = Modifier.fillMaxWidth().height(48.dp),
                 colors = ButtonDefaults.outlinedButtonColors(contentColor = MaterialTheme.colorScheme.error),
                 border = BorderStroke(1.dp, MaterialTheme.colorScheme.error.copy(alpha = .5f)),
@@ -750,13 +807,13 @@ private fun ReviewScreen(state: AppUiState, model: AppViewModel) {
 }
 
 @Composable
-private fun RatingButtons(actions: List<Pair<String, () -> Unit>>) {
+private fun RatingButtons(actions: List<Pair<String, () -> Unit>>, enabled: Boolean) {
     Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
         Text("这次完成得怎样？", style = MaterialTheme.typography.titleMedium)
         Row(horizontalArrangement = Arrangement.spacedBy(6.dp), modifier = Modifier.fillMaxWidth()) {
             actions.forEachIndexed { index, (label, action) ->
-                if (index < 2) OutlinedButton(action, Modifier.weight(1f).height(52.dp)) { Text(label) }
-                else Button(action, Modifier.weight(1f).height(52.dp)) { Text(label) }
+                if (index < 2) OutlinedButton(action, Modifier.weight(1f).height(52.dp), enabled = enabled) { Text(label) }
+                else Button(action, Modifier.weight(1f).height(52.dp), enabled = enabled) { Text(label) }
             }
         }
     }

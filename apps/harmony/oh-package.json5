@@ -1,7 +1,7 @@
 {
   "modelVersion": "5.0.0",
   "name": "reviewfault",
-  "version": "0.2.1",
+  "version": "0.2.2",
   "description": "考研数学与 408 间隔学习",
   "dependencies": {}
 }

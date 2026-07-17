@@ -30,7 +30,8 @@ for (const platform of platforms) {
     'review_log', 'attempt', 'memory_card', 'math_problem', 'scheduler_state',
     'foreign_key_check', 'integrity_check', 'reviewfault-backup',
     'learning_preferences', 'review_event_v2', 'memory_schedule_state',
-    'math_schedule_state', 'deleted_at',
+    'math_schedule_state', 'deleted_at', 'include_memory_cards',
+    'include_math_problems', 'daily_new_memory_limit',
   ]) {
     assert(repository.includes(token), `${platform.name} repository is missing ${token}`);
   }

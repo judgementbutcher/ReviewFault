@@ -103,7 +103,8 @@ void test_queue_order_and_sections() {
   };
   QueuePlanConfig config{now, day_start, 1, 0};
   const auto plan = plan_queue(candidates, config);
-  expect(plan.items.size() == 6, "queue includes five due items and one new item");
+  expect(plan.items.size() == 7,
+         "queue includes five due items, one limited memory card, and new math");
   expect(plan.items[0].item.id == "card-overdue-short",
          "short overdue reviews come first");
   expect(plan.items[0].section == QueueSection::Overdue,
@@ -111,7 +112,15 @@ void test_queue_order_and_sections() {
   expect(plan.items[3].item.id == "card-due",
          "408 due item precedes math due item");
   expect(plan.items[5].item.id == "new-card", "new 408 item precedes new math");
-  expect(plan.omitted_new_count == 1, "new item limit is reported");
+  expect(plan.items[6].item.id == "new-math", "new math does not consume the 408 limit");
+  expect(plan.omitted_new_count == 0, "only omitted 408 cards count against the limit");
+
+  const auto no_new_memory = plan_queue(candidates, {now, day_start, 0, 0});
+  expect(no_new_memory.items.size() == 6 &&
+             no_new_memory.items.back().item.id == "new-math",
+         "a zero 408 limit still leaves new math available");
+  expect(no_new_memory.omitted_new_count == 1,
+         "a memory card omitted by the daily limit is reported");
 }
 
 void test_queue_time_budget() {

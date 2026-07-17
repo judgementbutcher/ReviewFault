@@ -8,6 +8,8 @@
 | 题库/设置 | 领域分页与设置校验；平台仓储包含标签、软删除、恢复和设置 | 5,000 条数据性能与 UI 自动化 |
 | 原生 UI | Android 设置/提醒/回收站，Harmony ArkUI 页面，Windows NavigationView | 动态字体、读屏、暗色对比与响应式真机审计 |
 
-当前容器实际运行 `make test`。它不含 Java、Android SDK、.NET CLI、Windows SDK 或
-DevEco Studio，因此本次不能声称 APK、Windows 应用或 HAP 已构建；相应命令必须在
-`.github/workflows/verify.yml` 和组织的签名 HarmonyOS runner 执行后才能发布。
+本轮已在宿主环境运行 `make test`、Windows 仓储集成测试、Linux 上的 WinUI 托管编译，
+以及 Android debug/release 的双 ABI 构建与 lint；release APK 还使用临时测试证书完成了
+签名结构校验。正式 Android 资产必须由仓库持久证书重新签名，Windows 原生包必须由
+Windows runner 生成，HAP 必须由组织的签名 HarmonyOS runner 生成。API 26/35 真机、
+Windows 10/11 以及三端互恢复仍属于发布后的设备验收。

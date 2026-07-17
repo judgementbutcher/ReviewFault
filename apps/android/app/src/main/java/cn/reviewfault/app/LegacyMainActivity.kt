@@ -33,6 +33,7 @@ import java.time.Instant
 import java.time.ZoneId
 import java.time.ZonedDateTime
 import java.util.UUID
+import java.util.Locale
 import kotlin.math.roundToInt
 import org.json.JSONArray
 
@@ -393,11 +394,11 @@ class LegacyMainActivity : Activity() {
     private fun showSettings() {
         val current = database.learningPreferences()
         val limit = editor("每日新 408 上限").apply {
-            setText(current.dailyNewMemoryLimit.toString()); minLines = 1
+            setText(String.format(Locale.getDefault(), "%d", current.dailyNewMemoryLimit)); minLines = 1
             inputType = android.text.InputType.TYPE_CLASS_NUMBER
         }
         val minutes = editor("单次学习分钟数").apply {
-            setText(current.sessionMinutes.toString()); minLines = 1
+            setText(String.format(Locale.getDefault(), "%d", current.sessionMinutes)); minLines = 1
             inputType = android.text.InputType.TYPE_CLASS_NUMBER
         }
         val memory = Spinner(this).apply {

@@ -25,6 +25,13 @@ cd apps/android
 
 数据库 schema 直接从仓库根目录加入 app assets；CMake 直接编译共享核心，不复制算法源码。本仓库已在 SDK 35、NDK r27、CMake 3.22.1 上通过 `assembleDebug` 与 `lintDebug`。首次启动、图片选择和备份恢复仍应在 API 26、API 35 各做一次设备测试。
 
+正式发布必须使用可跨版本复用的签名证书，不能发布 CI 临时 debug 签名。release workflow
+需要仓库 secrets：`ANDROID_KEYSTORE_BASE64`、`ANDROID_KEYSTORE_PASSWORD`、
+`ANDROID_KEY_ALIAS`、`ANDROID_KEY_PASSWORD`、`ANDROID_CERT_SHA256`。其中第一个值是
+JKS/PKCS12 文件的 base64 内容，最后一个值是证书 SHA-256 指纹（小写且不含冒号）；
+私钥本身不得提交到仓库。配置完成后，`v0.2.2` tag 会构建并校验
+`assembleRelease`，生成可覆盖升级的正式 APK。
+
 ## HarmonyOS
 
 用 DevEco Studio 打开 `apps/harmony`，选择 HarmonyOS SDK API 13 或更高版本，并为 `default` product 配置签名。运行 entry 模块。CMake 在构建期把根目录的 schema 注入 NAPI 模块；不要手工复制 SQL。

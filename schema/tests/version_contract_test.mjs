@@ -1,0 +1,42 @@
+import assert from 'node:assert/strict';
+import { readFileSync } from 'node:fs';
+
+const version = '0.2.2';
+const read = (relative) => readFileSync(new URL(relative, import.meta.url), 'utf8');
+
+const contracts = [
+  ['README', '../../README.md', `当前版本为 **${version}**`],
+  ['CMake', '../../CMakeLists.txt', `VERSION ${version}`],
+  ['Android', '../../apps/android/app/build.gradle.kts', `versionName = "${version}"`],
+  ['Harmony app', '../../apps/harmony/AppScope/app.json5', `"versionName": "${version}"`],
+  ['Harmony package', '../../apps/harmony/entry/oh-package.json5', `"version": "${version}"`],
+  ['Windows project', '../../apps/windows/ReviewFault/ReviewFault.csproj', `<Version>${version}</Version>`],
+  ['Windows manifest', '../../apps/windows/ReviewFault/app.manifest', `version="${version}.0"`],
+  ['verify workflow', '../../.github/workflows/verify.yml', `APP_VERSION: ${version}`],
+  ['release workflow', '../../.github/workflows/release.yml', `APP_VERSION: ${version}`],
+  ['release notes', `../../docs/release-v${version}.md`, `# ReviewFault v${version}`],
+];
+
+for (const [name, path, token] of contracts) {
+  assert(read(path).includes(token), `${name} is not synchronized to ${version}`);
+}
+
+for (const repository of [
+  '../../apps/windows/ReviewFault/Data/AppRepository.cs',
+  '../../apps/harmony/entry/src/main/ets/data/AppRepository.ets',
+]) {
+  assert(read(repository).includes(version), `${repository} backup metadata is stale`);
+}
+
+const release = read('../../.github/workflows/release.yml');
+assert(release.includes('assembleRelease') && !release.includes('assembleDebug'),
+  'release workflow must build the signed release APK');
+assert(release.includes('ANDROID_KEYSTORE_BASE64'),
+  'release workflow must require persistent Android signing credentials');
+assert(release.includes('ANDROID_CERT_SHA256') && release.includes('apksigner') &&
+  release.includes('--print-certs'),
+  'release workflow must pin and verify the Android signing certificate');
+assert(release.includes('test "$GITHUB_REF_NAME" = "v$APP_VERSION"'),
+  'release tag must match application metadata');
+
+console.log(`Version ${version} contract tests passed`);

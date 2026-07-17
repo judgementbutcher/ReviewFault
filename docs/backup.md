@@ -4,7 +4,7 @@
 `media/`。v2 清单由 `schema/backup-v2.schema.json` 固定，声明应用 0.2.x、schema 2、
 调度 ABI 2，并为每个负载保存 SHA-256 和字节数。
 
-恢复顺序为：安全路径解压、版本组合校验、逐文件长度/哈希校验、SQLite
+恢复顺序为：限制解压总量与文件数、安全路径解压、拒绝重复或未声明文件、版本组合校验、逐文件长度/哈希校验、SQLite
 `integrity_check`、`foreign_key_check`，最后以可回滚事务替换本地数据。v0.2 接受：
 
 - manifest/schema/ABI `1/1/1`，恢复后立即执行 `002_v0_2.sql`；

@@ -1,5 +1,6 @@
 using ReviewFault.Core;
 using ReviewFault.Data;
+using System.IO.Compression;
 
 var root = Path.Combine(Path.GetTempPath(), "ReviewFaultHeadless-" + Guid.NewGuid());
 Directory.CreateDirectory(root);
@@ -14,7 +15,7 @@ try
     var enumerationId = await repository.CreateMemoryCardAsync(
         "enumeration", "computer_networks", "TCP 拥塞控制的四个阶段？", "",
         new[] { "慢开始", "拥塞避免", "快重传", "快恢复" });
-    await RequireThrowsAsync(
+    await RequireThrowsAsync<ArgumentException>(
         () => repository.CreateMemoryCardAsync("cloze", "computer_networks", "没有标记", "", []),
         "invalid cloze is rejected");
     var image = Path.Combine(root, "problem.jpg");
@@ -80,6 +81,36 @@ try
     Require(restored.Count == 1 && restored[0].Prompt == "什么是工作集？",
         "backup restore replaces later edits");
 
+    var undeclaredBackup = new MemoryStream();
+    await undeclaredBackup.WriteAsync(backup.ToArray());
+    undeclaredBackup.Position = 0;
+    using (var archive = new ZipArchive(undeclaredBackup, ZipArchiveMode.Update, leaveOpen: true))
+    {
+        var extra = archive.CreateEntry("media/not-in-manifest.jpg");
+        await using var output = extra.Open();
+        await output.WriteAsync(new byte[] { 1, 2, 3 });
+    }
+    undeclaredBackup.Position = 0;
+    await RequireThrowsAsync<InvalidDataException>(
+        () => repository.RestoreBackupAsync(undeclaredBackup),
+        "restore rejects payload files omitted from the manifest");
+
+    var duplicateBackup = new MemoryStream();
+    await duplicateBackup.WriteAsync(backup.ToArray());
+    duplicateBackup.Position = 0;
+    using (var archive = new ZipArchive(duplicateBackup, ZipArchiveMode.Update, leaveOpen: true))
+    {
+        var duplicate = archive.CreateEntry("database.sqlite");
+        await using var output = duplicate.Open();
+        await output.WriteAsync(new byte[] { 0 });
+    }
+    duplicateBackup.Position = 0;
+    await RequireThrowsAsync<InvalidDataException>(
+        () => repository.RestoreBackupAsync(duplicateBackup),
+        "restore rejects duplicate archive entries");
+    Require((await repository.SearchAsync("工作集")).Count == 1,
+        "rejected backups leave current data untouched");
+
     var summary = await repository.DashboardAsync(
         DateTimeOffset.UtcNow.ToUnixTimeSeconds(), new DateTimeOffset(DateTime.Today).ToUnixTimeSeconds());
     Require(summary.NewItems >= 2, "dashboard reads restored queue state");
@@ -95,14 +126,15 @@ static void Require(bool condition, string message)
     if (!condition) throw new InvalidOperationException("FAIL: " + message);
 }
 
-static async Task RequireThrowsAsync(Func<Task> action, string message)
+static async Task RequireThrowsAsync<TException>(Func<Task> action, string message)
+    where TException : Exception
 {
     try
     {
         await action();
         throw new InvalidOperationException("FAIL: " + message);
     }
-    catch (ArgumentException)
+    catch (TException)
     {
     }
 }

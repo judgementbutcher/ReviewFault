@@ -43,7 +43,9 @@ schema-test:
 	node --no-warnings schema/tests/migration_test.mjs
 	node --no-warnings schema/tests/migration_v2_test.mjs
 	node --no-warnings schema/tests/backup_manifest_test.mjs
+	node --no-warnings schema/tests/queue_contract_test.mjs
 	node --no-warnings schema/tests/platform_contract_test.mjs
+	node --no-warnings schema/tests/version_contract_test.mjs
 
 clean:
 	rm -rf $(BUILD_DIR)

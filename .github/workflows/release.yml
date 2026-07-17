@@ -1,11 +1,18 @@
 name: release
 
+env:
+  APP_VERSION: 0.2.2
+
 on:
   push:
     tags: ['v*']
 
 permissions:
   contents: write
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
 
 jobs:
   core:
@@ -15,7 +22,16 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version: 22
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: 8.0.x
+      - name: Verify release tag
+        run: test "$GITHUB_REF_NAME" = "v$APP_VERSION"
       - run: make test
+      - name: Verify Windows repository integration
+        run: dotnet run --project apps/windows/ReviewFault.HeadlessTests
+        env:
+          LD_LIBRARY_PATH: ${{ github.workspace }}/build
 
   android:
     runs-on: ubuntu-24.04
@@ -28,13 +44,43 @@ jobs:
       - uses: android-actions/setup-android@v3
       - run: sdkmanager "platforms;android-35" "build-tools;35.0.0" "ndk;27.0.12077973" "cmake;3.22.1"
       - uses: gradle/actions/setup-gradle@v4
-      - run: ./gradlew :app:assembleDebug :app:lintDebug
+      - name: Configure Android release signing
+        env:
+          KEYSTORE_BASE64: ${{ secrets.ANDROID_KEYSTORE_BASE64 }}
+          ANDROID_KEYSTORE_PASSWORD: ${{ secrets.ANDROID_KEYSTORE_PASSWORD }}
+          ANDROID_KEY_ALIAS: ${{ secrets.ANDROID_KEY_ALIAS }}
+          ANDROID_KEY_PASSWORD: ${{ secrets.ANDROID_KEY_PASSWORD }}
+          ANDROID_CERT_SHA256: ${{ secrets.ANDROID_CERT_SHA256 }}
+        run: |
+          test -n "$KEYSTORE_BASE64"
+          test -n "$ANDROID_KEYSTORE_PASSWORD"
+          test -n "$ANDROID_KEY_ALIAS"
+          test -n "$ANDROID_KEY_PASSWORD"
+          test -n "$ANDROID_CERT_SHA256"
+          printf '%s' "$KEYSTORE_BASE64" | base64 --decode > "$RUNNER_TEMP/reviewfault-release.jks"
         working-directory: apps/android
-      - run: cp apps/android/app/build/outputs/apk/debug/app-debug.apk ReviewFault-android-v0.2.1-debug.apk
+      - run: ./gradlew :app:assembleRelease :app:lintRelease
+        working-directory: apps/android
+        env:
+          ANDROID_KEYSTORE_PATH: ${{ runner.temp }}/reviewfault-release.jks
+          ANDROID_KEYSTORE_PASSWORD: ${{ secrets.ANDROID_KEYSTORE_PASSWORD }}
+          ANDROID_KEY_ALIAS: ${{ secrets.ANDROID_KEY_ALIAS }}
+          ANDROID_KEY_PASSWORD: ${{ secrets.ANDROID_KEY_PASSWORD }}
+      - run: cp apps/android/app/build/outputs/apk/release/app-release.apk "ReviewFault-android-v${APP_VERSION}.apk"
+      - name: Verify Android release identity
+        env:
+          ANDROID_CERT_SHA256: ${{ secrets.ANDROID_CERT_SHA256 }}
+        run: |
+          APK="ReviewFault-android-v${APP_VERSION}.apk"
+          BUILD_TOOLS="$ANDROID_HOME/build-tools/35.0.0"
+          "$BUILD_TOOLS/apksigner" verify --verbose "$APK"
+          "$BUILD_TOOLS/aapt2" dump badging "$APK" | grep -F "versionName='${APP_VERSION}'"
+          ACTUAL_CERT_SHA256="$("$BUILD_TOOLS/apksigner" verify --print-certs "$APK" | sed -n 's/^Signer #1 certificate SHA-256 digest: //p')"
+          test "${ACTUAL_CERT_SHA256,,}" = "${ANDROID_CERT_SHA256,,}"
       - uses: actions/upload-artifact@v4
         with:
           name: android-release
-          path: ReviewFault-android-v0.2.1-debug.apk
+          path: ReviewFault-android-v${{ env.APP_VERSION }}.apk
 
   windows:
     runs-on: windows-2022
@@ -46,11 +92,11 @@ jobs:
       - uses: microsoft/setup-msbuild@v2
       - run: msbuild apps/windows/ReviewFault/ReviewFault.csproj -restore -p:Platform=x64 -p:Configuration=Release
       - shell: pwsh
-        run: Compress-Archive -Path apps/windows/ReviewFault/bin/x64/Release/* -DestinationPath ReviewFault-windows-v0.2.1-x64.zip
+        run: Compress-Archive -Path apps/windows/ReviewFault/bin/x64/Release/* -DestinationPath ReviewFault-windows-v${{ env.APP_VERSION }}-x64.zip
       - uses: actions/upload-artifact@v4
         with:
           name: windows-release
-          path: ReviewFault-windows-v0.2.1-x64.zip
+          path: ReviewFault-windows-v${{ env.APP_VERSION }}-x64.zip
 
   publish:
     needs: [core, android, windows]
@@ -61,12 +107,12 @@ jobs:
         with:
           pattern: '*-release'
           merge-multiple: true
-      - run: sha256sum ReviewFault-android-v0.2.1-debug.apk ReviewFault-windows-v0.2.1-x64.zip > SHA256SUMS
+      - run: sha256sum "ReviewFault-android-v${APP_VERSION}.apk" "ReviewFault-windows-v${APP_VERSION}-x64.zip" > SHA256SUMS
       - uses: softprops/action-gh-release@v2
         with:
-          name: ReviewFault v0.2.1
-          body_path: docs/release-v0.2.1.md
+          name: ReviewFault v${{ env.APP_VERSION }}
+          body_path: docs/release-v0.2.2.md
           files: |
-            ReviewFault-android-v0.2.1-debug.apk
-            ReviewFault-windows-v0.2.1-x64.zip
+            ReviewFault-android-v${{ env.APP_VERSION }}.apk
+            ReviewFault-windows-v${{ env.APP_VERSION }}-x64.zip
             SHA256SUMS

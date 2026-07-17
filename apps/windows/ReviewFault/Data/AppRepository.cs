@@ -35,6 +35,9 @@ public sealed record TrashRow(string Id, string Kind, string Prompt, long Delete
 
 public sealed class AppRepository
 {
+    private const string AppVersion = "0.2.2";
+    private const long MaxBackupBytes = 2L * 1024 * 1024 * 1024;
+    private const int MaxBackupEntries = 10_000;
     // The v1 review_log remains read-only input for gradual history replay.
     private readonly string appDirectory;
     private readonly string connectionString;
@@ -89,21 +92,36 @@ public sealed class AppRepository
         var command = connection.CreateCommand();
         command.CommandText = """
             SELECT
-              COALESCE(SUM(CASE WHEN scheduler_state <> 0 AND due_at < $dayStart THEN 1 ELSE 0 END), 0),
-              COALESCE(SUM(CASE WHEN scheduler_state <> 0 AND due_at BETWEEN $dayStart AND $now THEN 1 ELSE 0 END), 0),
-              COALESCE(SUM(CASE WHEN scheduler_state = 0 THEN 1 ELSE 0 END), 0),
-              COALESCE(SUM(CASE WHEN scheduler_state = 0 OR due_at <= $now
-                THEN CASE WHEN kind = 'math_problem' THEN 480 ELSE 45 END ELSE 0 END), 0)
-            FROM study_item
-            WHERE suspended_at IS NULL AND deleted_at IS NULL
+              COALESCE(SUM(CASE WHEN s.scheduler_state <> 0 AND s.due_at < $dayStart THEN 1 ELSE 0 END), 0),
+              COALESCE(SUM(CASE WHEN s.scheduler_state <> 0 AND s.due_at BETWEEN $dayStart AND $now THEN 1 ELSE 0 END), 0),
+              COALESCE(SUM(CASE WHEN s.scheduler_state = 0 AND s.kind = 'memory_card' THEN 1 ELSE 0 END), 0),
+              COALESCE(SUM(CASE WHEN s.scheduler_state = 0 AND s.kind = 'math_problem' THEN 1 ELSE 0 END), 0),
+              COALESCE(SUM(CASE WHEN s.scheduler_state <> 0 AND s.due_at <= $now
+                THEN CASE WHEN s.kind = 'math_problem' THEN 480 ELSE 45 END ELSE 0 END), 0),
+              lp.daily_new_memory_limit,
+              (SELECT COUNT(*) FROM review_event_v2 e
+               JOIN memory_review_event_v2 mr ON mr.review_event_id = e.id
+               WHERE mr.state_before = 0 AND e.reviewed_at >= $dayStart)
+            FROM learning_preferences lp
+            LEFT JOIN study_item s ON s.suspended_at IS NULL AND s.deleted_at IS NULL AND (
+              (s.kind = 'math_problem' AND lp.include_math_problems = 1) OR
+              (s.kind = 'memory_card' AND lp.include_memory_cards = 1 AND (
+                (s.subject = 'data_structures' AND lp.enable_data_structures = 1) OR
+                (s.subject = 'computer_organization' AND lp.enable_computer_organization = 1) OR
+                (s.subject = 'operating_systems' AND lp.enable_operating_systems = 1) OR
+                (s.subject = 'computer_networks' AND lp.enable_computer_networks = 1))))
+            WHERE lp.singleton = 1
             """;
         command.Parameters.AddWithValue("$dayStart", dayStart);
         command.Parameters.AddWithValue("$now", now);
         await using var reader = await command.ExecuteReaderAsync();
         await reader.ReadAsync();
-        return new DashboardSummary(
-            reader.GetInt32(0), reader.GetInt32(1), reader.GetInt32(2),
-            (reader.GetInt32(3) + 59) / 60);
+        var remainingNewMemory = Math.Max(0, reader.GetInt32(5) - reader.GetInt32(6));
+        var newMemory = Math.Min(reader.GetInt32(2), remainingNewMemory);
+        var newMath = reader.GetInt32(3);
+        return new DashboardSummary(reader.GetInt32(0), reader.GetInt32(1),
+            newMemory + newMath,
+            (reader.GetInt32(4) + newMemory * 45 + newMath * 480 + 59) / 60);
     }
 
     public async Task<StudyRow?> NextForReviewAsync(long now)
@@ -127,13 +145,21 @@ public sealed class AppRepository
             LEFT JOIN math_problem_media pm
               ON pm.math_problem_id = s.id AND pm.role = 'prompt' AND pm.sort_order = 0
             LEFT JOIN media ON media.id = pm.media_id
+            CROSS JOIN learning_preferences lp
             WHERE s.suspended_at IS NULL AND s.deleted_at IS NULL
+              AND lp.singleton = 1
+              AND ((s.kind = 'math_problem' AND lp.include_math_problems = 1) OR
+                (s.kind = 'memory_card' AND lp.include_memory_cards = 1 AND (
+                  (s.subject = 'data_structures' AND lp.enable_data_structures = 1) OR
+                  (s.subject = 'computer_organization' AND lp.enable_computer_organization = 1) OR
+                  (s.subject = 'operating_systems' AND lp.enable_operating_systems = 1) OR
+                  (s.subject = 'computer_networks' AND lp.enable_computer_networks = 1))))
               AND ((s.scheduler_state <> 0 AND s.due_at <= $now)
                 OR (s.scheduler_state = 0 AND (s.kind = 'math_problem' OR (
                   SELECT COUNT(*) FROM review_event_v2 e
-                  JOIN memory_review_event_v2 m ON m.review_event_id = e.id
-                  WHERE m.state_before = 0 AND e.reviewed_at >= $dayStart
-                ) < (SELECT daily_new_memory_limit FROM learning_preferences WHERE singleton = 1))))
+                  JOIN memory_review_event_v2 mr ON mr.review_event_id = e.id
+                  WHERE mr.state_before = 0 AND e.reviewed_at >= $dayStart
+                ) < lp.daily_new_memory_limit)))
             ORDER BY
               CASE WHEN s.scheduler_state <> 0 AND s.due_at < $dayStart THEN 0
                    WHEN s.scheduler_state <> 0 THEN 1 ELSE 2 END,
@@ -648,7 +674,7 @@ public sealed class AppRepository
         {
             format = "reviewfault-backup",
             version = 2,
-            appVersion = "0.2.1",
+            appVersion = AppVersion,
             schemaVersion = 2,
             schedulerAbiVersion = 2,
             exportedAt = DateTimeOffset.UtcNow.ToUnixTimeSeconds(),
@@ -674,12 +700,20 @@ public sealed class AppRepository
         Directory.CreateDirectory(restoreRoot);
         try
         {
+            var extractedFiles = new HashSet<string>(StringComparer.Ordinal);
+            long extractedBytes = 0;
             using (var archive = new ZipArchive(input, ZipArchiveMode.Read, leaveOpen: true))
             {
+                if (archive.Entries.Count > MaxBackupEntries)
+                    throw new InvalidDataException("备份文件数量过多，已拒绝恢复");
                 var safeRoot = Path.GetFullPath(restoreRoot) + Path.DirectorySeparatorChar;
                 foreach (var entry in archive.Entries)
                 {
-                    var destination = Path.GetFullPath(Path.Combine(restoreRoot, entry.FullName));
+                    var relative = entry.FullName.Replace('\\', '/');
+                    if (relative != "manifest.json" && relative != "database.sqlite" &&
+                        !relative.StartsWith("media/", StringComparison.Ordinal))
+                        throw new InvalidDataException($"备份包含未知文件：{relative}");
+                    var destination = Path.GetFullPath(Path.Combine(restoreRoot, relative));
                     if (!destination.StartsWith(safeRoot, StringComparison.OrdinalIgnoreCase))
                         throw new InvalidDataException("备份包含非法路径");
                     if (string.IsNullOrEmpty(entry.Name))
@@ -687,6 +721,11 @@ public sealed class AppRepository
                         Directory.CreateDirectory(destination);
                         continue;
                     }
+                    if (!extractedFiles.Add(relative))
+                        throw new InvalidDataException($"备份包含重复文件：{relative}");
+                    extractedBytes = checked(extractedBytes + entry.Length);
+                    if (extractedBytes > MaxBackupBytes)
+                        throw new InvalidDataException("备份解压后超过 2 GiB，已拒绝恢复");
                     Directory.CreateDirectory(Path.GetDirectoryName(destination)!);
                     await using var source = entry.Open();
                     await using var target = File.Create(destination);
@@ -703,16 +742,30 @@ public sealed class AppRepository
                 !((backupVersion == 1 && schemaVersion == 1 && abiVersion == 1) ||
                   (backupVersion == 2 && schemaVersion == 2 && abiVersion == 2)))
                 throw new InvalidDataException("不是受支持的 ReviewFault 备份");
+            var listedFiles = new HashSet<string>(StringComparer.Ordinal);
+            long listedBytes = 0;
             foreach (var item in root.GetProperty("files").EnumerateArray())
             {
                 var relative = item.GetProperty("path").GetString()!;
+                if (relative != "database.sqlite" &&
+                    !relative.StartsWith("media/", StringComparison.Ordinal))
+                    throw new InvalidDataException("备份清单包含非法路径");
+                if (!listedFiles.Add(relative))
+                    throw new InvalidDataException($"备份清单包含重复文件：{relative}");
+                var declaredBytes = item.GetProperty("bytes").GetInt64();
+                if (declaredBytes < 0 ||
+                    (listedBytes = checked(listedBytes + declaredBytes)) > MaxBackupBytes)
+                    throw new InvalidDataException("备份清单超过 2 GiB，已拒绝恢复");
                 var filePath = Path.GetFullPath(Path.Combine(restoreRoot, relative));
                 var safeRoot = Path.GetFullPath(restoreRoot) + Path.DirectorySeparatorChar;
                 if (!filePath.StartsWith(safeRoot, StringComparison.OrdinalIgnoreCase) ||
-                    !File.Exists(filePath) || new FileInfo(filePath).Length != item.GetProperty("bytes").GetInt64() ||
+                    !File.Exists(filePath) || new FileInfo(filePath).Length != declaredBytes ||
                     await Sha256Async(filePath) != item.GetProperty("sha256").GetString())
                     throw new InvalidDataException($"备份文件校验失败：{relative}");
             }
+            listedFiles.Add("manifest.json");
+            if (!extractedFiles.SetEquals(listedFiles))
+                throw new InvalidDataException("备份包含未在清单中声明的文件");
             var restoredDatabase = Path.Combine(restoreRoot, "database.sqlite");
             var validationString = new SqliteConnectionStringBuilder
             {
