@@ -1,0 +1,10 @@
+build/
+.gradle/
+.idea/
+.vscode/
+**/.cxx/
+**/bin/
+**/obj/
+*.user
+*.suo
+*.log

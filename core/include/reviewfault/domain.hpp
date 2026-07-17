@@ -1,0 +1,100 @@
+#pragma once
+
+#include "reviewfault/scheduler.hpp"
+
+#include <cstddef>
+#include <cstdint>
+#include <string>
+#include <vector>
+
+namespace reviewfault {
+
+enum class StudyKind : std::int32_t {
+  MathProblem = 0,
+  MemoryCard = 1,
+};
+
+enum class MemoryTemplate : std::int32_t {
+  QuestionAnswer = 0,
+  Cloze = 1,
+  LayeredHint = 2,
+  Enumeration = 3,
+  ImageOcclusion = 4,
+  Comparison = 5,
+};
+
+enum class MathAttemptResult : std::int32_t {
+  CannotStart = 0,
+  Incorrect = 1,
+  EffortfulCorrect = 2,
+  FluentCorrect = 3,
+};
+
+struct ValidationError {
+  std::string field;
+  std::string code;
+};
+
+struct MemoryCardDraft {
+  MemoryTemplate template_type = MemoryTemplate::QuestionAnswer;
+  std::string prompt_markdown;
+  std::string answer_markdown;
+  std::vector<std::string> hints;
+  std::vector<std::string> answer_points;
+  std::size_t image_count = 0;
+  std::size_t occlusion_count = 0;
+};
+
+struct MathProblemDraft {
+  std::string prompt_markdown;
+  std::size_t prompt_image_count = 0;
+  std::string source_name;
+  std::string source_problem_number;
+  std::string solution_markdown;
+  std::size_t solution_image_count = 0;
+};
+
+[[nodiscard]] std::vector<ValidationError> validate(const MemoryCardDraft& draft);
+[[nodiscard]] std::vector<ValidationError> validate(const MathProblemDraft& draft);
+[[nodiscard]] Rating scheduler_rating(MathAttemptResult result);
+
+enum class QueueSection : std::int32_t {
+  Overdue = 0,
+  DueToday = 1,
+  NewToday = 2,
+};
+
+struct QueueCandidate {
+  std::string id;
+  StudyKind kind = StudyKind::MemoryCard;
+  CardState scheduler_state = CardState::New;
+  std::int64_t due_at = 0;
+  std::uint32_t estimated_seconds = 0;
+  bool suspended = false;
+};
+
+struct QueuePlanConfig {
+  std::int64_t now = 0;
+  std::int64_t local_day_start_utc = 0;
+  std::uint32_t new_item_limit = 20;
+  // Zero means no time-budget filtering.
+  std::uint32_t available_seconds = 0;
+};
+
+struct PlannedItem {
+  QueueCandidate item;
+  QueueSection section = QueueSection::DueToday;
+};
+
+struct QueuePlan {
+  std::vector<PlannedItem> items;
+  std::uint32_t estimated_seconds = 0;
+  std::uint32_t omitted_due_count = 0;
+  std::uint32_t omitted_new_count = 0;
+};
+
+[[nodiscard]] QueuePlan plan_queue(const std::vector<QueueCandidate>& candidates,
+                                   const QueuePlanConfig& config);
+
+}  // namespace reviewfault
+

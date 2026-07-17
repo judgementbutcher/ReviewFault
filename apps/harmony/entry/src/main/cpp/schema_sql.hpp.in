@@ -1,0 +1,4 @@
+#pragma once
+
+inline constexpr char kReviewFaultSchemaV1[] = R"RFSQL(@REVIEWFAULT_SCHEMA_SQL@)RFSQL";
+

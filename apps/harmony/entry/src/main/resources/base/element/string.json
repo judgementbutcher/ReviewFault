@@ -1,0 +1,8 @@
+{
+  "string": [
+    { "name": "app_name", "value": "ReviewFault" },
+    { "name": "module_desc", "value": "考研间隔学习" },
+    { "name": "entry_desc", "value": "ReviewFault 主窗口" }
+  ]
+}
+

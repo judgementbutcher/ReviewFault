@@ -1,0 +1,15 @@
+{
+  "apiType": "stageMode",
+  "buildOption": {
+    "externalNativeOptions": {
+      "path": "./src/main/cpp/CMakeLists.txt",
+      "arguments": "",
+      "cppFlags": "-std=c++20 -Wall -Wextra -Werror"
+    }
+  },
+  "buildOptionSet": [
+    { "name": "release", "arkOptions": { "obfuscation": { "ruleOptions": { "enable": true, "files": ["./obfuscation-rules.txt"] } } } }
+  ],
+  "targets": [ { "name": "default" } ]
+}
+

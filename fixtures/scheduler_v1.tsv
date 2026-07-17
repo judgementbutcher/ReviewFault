@@ -1,0 +1,10 @@
+# scheduler_abi_version=1
+# Golden vectors use UTC seconds and tab-separated fields. Every native binding must reproduce them.
+case	state	difficulty	stability_days	due_at	last_reviewed_at	repetitions	lapses	rating	reviewed_at	target_retention	expected_state	expected_difficulty	expected_stability_days	expected_due_at	expected_repetitions	expected_lapses	expected_scheduled_days	expected_retrievability
+new_again	0	0	0	0	0	0	0	1	1800000000	0.9	1	8	0.12	1800000600	1	0	0.006944444444444444	0
+new_good	0	0	0	0	0	0	0	3	1800000000	0.9	2	5	2	1800172800	1	0	2	0
+review_hard	2	5	10	1800000000	1799136000	4	0	2	1800000000	0.9	2	5.35	14.2	1801226880	5	0	14.2	0.9
+review_good	2	5	10	1800000000	1799136000	4	0	3	1800000000	0.9	2	4.85	20.8	1801797120	5	0	20.8	0.9
+review_easy	2	5	10	1800000000	1799136000	4	0	4	1800000000	0.9	2	4.2	29.2	1802522880	5	0	29.2	0.9
+review_again	2	5	10	1800000000	1799136000	4	0	1	1800000000	0.9	3	6.2	3.3775	1800000600	5	1	0.006944444444444444	0.9
+
