@@ -49,6 +49,47 @@ int kind_priority(StudyKind kind) {
   return kind == StudyKind::MemoryCard ? 0 : 1;
 }
 
+bool valid_kind(StudyKind kind) {
+  return kind == StudyKind::MathProblem || kind == StudyKind::MemoryCard;
+}
+
+void interleave_math_chapters(std::vector<PlannedItem>& items) {
+  if (items.size() < 3) {
+    return;
+  }
+  for (std::size_t index = 2; index < items.size(); ++index) {
+    const auto& current = items[index];
+    const auto& previous = items[index - 1];
+    const auto& before_previous = items[index - 2];
+    const bool repeats = current.item.kind == StudyKind::MathProblem &&
+                         previous.item.kind == StudyKind::MathProblem &&
+                         before_previous.item.kind == StudyKind::MathProblem &&
+                         !current.item.chapter_id.empty() &&
+                         current.item.chapter_id == previous.item.chapter_id &&
+                         current.item.chapter_id == before_previous.item.chapter_id;
+    if (!repeats) {
+      continue;
+    }
+    const auto section_end = std::find_if(
+        items.begin() + static_cast<std::ptrdiff_t>(index + 1), items.end(),
+        [&](const PlannedItem& candidate) { return candidate.section != current.section; });
+    const auto replacement = std::find_if(
+        items.begin() + static_cast<std::ptrdiff_t>(index + 1), section_end,
+        [&](const PlannedItem& candidate) {
+          return candidate.item.kind != StudyKind::MathProblem ||
+                 candidate.item.chapter_id != current.item.chapter_id;
+        });
+    if (replacement != section_end) {
+      std::rotate(items.begin() + static_cast<std::ptrdiff_t>(index), replacement,
+                  replacement + 1);
+    } else if (section_end != items.end()) {
+      index = static_cast<std::size_t>(std::distance(items.begin(), section_end)) - 1;
+    } else {
+      break;
+    }
+  }
+}
+
 }  // namespace
 
 std::vector<ValidationError> validate(const MemoryCardDraft& draft) {
@@ -123,6 +164,46 @@ Rating scheduler_rating(MathAttemptResult result) {
   throw std::invalid_argument("math attempt result is invalid");
 }
 
+std::vector<ValidationError> validate(const LearningPreferences& preferences) {
+  std::vector<ValidationError> errors;
+  if (preferences.daily_new_memory_limit > 500) {
+    errors.push_back({"daily_new_memory_limit", "limit_out_of_range"});
+  }
+  if (preferences.session_minutes == 0 || preferences.session_minutes > 240) {
+    errors.push_back({"session_minutes", "duration_out_of_range"});
+  }
+  if (!preferences.include_memory_cards && !preferences.include_math_problems) {
+    errors.push_back({"queue_filter", "at_least_one_kind_required"});
+  }
+  try {
+    (void)target_retention(preferences.memory_preset);
+  } catch (const std::invalid_argument&) {
+    errors.push_back({"memory_preset", "invalid_preset"});
+  }
+  try {
+    (void)interval_multiplier(preferences.math_intensity);
+  } catch (const std::invalid_argument&) {
+    errors.push_back({"math_intensity", "invalid_intensity"});
+  }
+  return errors;
+}
+
+std::vector<ValidationError> validate(const LibraryFilter& filter) {
+  std::vector<ValidationError> errors;
+  if (filter.limit == 0 || filter.limit > 200) {
+    errors.push_back({"limit", "page_size_out_of_range"});
+  }
+  if (std::any_of(filter.kinds.begin(), filter.kinds.end(),
+                  [](StudyKind kind) { return !valid_kind(kind); })) {
+    errors.push_back({"kinds", "invalid_kind"});
+  }
+  const auto status = static_cast<std::int32_t>(filter.status);
+  if (status < 0 || status > 3) {
+    errors.push_back({"status", "invalid_status"});
+  }
+  return errors;
+}
+
 QueuePlan plan_queue(const std::vector<QueueCandidate>& candidates,
                      const QueuePlanConfig& config) {
   if (config.now <= 0 || config.local_day_start_utc <= 0 ||
@@ -133,7 +214,7 @@ QueuePlan plan_queue(const std::vector<QueueCandidate>& candidates,
   std::vector<PlannedItem> due;
   std::vector<PlannedItem> fresh;
   for (const auto& candidate : candidates) {
-    if (candidate.id.empty() || candidate.suspended) {
+    if (candidate.id.empty() || candidate.suspended || candidate.deleted) {
       continue;
     }
     if (candidate.scheduler_state == CardState::New) {
@@ -168,6 +249,8 @@ QueuePlan plan_queue(const std::vector<QueueCandidate>& candidates,
     return std::tuple(kind_priority(left.item.kind), left.item.id) <
            std::tuple(kind_priority(right.item.kind), right.item.id);
   });
+  interleave_math_chapters(due);
+  interleave_math_chapters(fresh);
 
   QueuePlan plan;
   std::uint32_t used_new = 0;
@@ -207,4 +290,3 @@ QueuePlan plan_queue(const std::vector<QueueCandidate>& candidates,
 }
 
 }  // namespace reviewfault
-

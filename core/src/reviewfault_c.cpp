@@ -1,6 +1,7 @@
 #include "reviewfault/reviewfault_c.h"
 
 #include "reviewfault/scheduler.hpp"
+#include "reviewfault/scheduler_v2.hpp"
 
 #include <algorithm>
 #include <cstring>
@@ -58,6 +59,107 @@ rf_review_log to_c_log(const reviewfault::ReviewLog& log) {
       log.stability_before,
       log.stability_after,
   };
+}
+
+rf_memory_schedule_state_v2 to_c_memory_state(
+    const reviewfault::MemoryScheduleState& state) {
+  return {sizeof(rf_memory_schedule_state_v2),
+          static_cast<int32_t>(state.state),
+          state.difficulty,
+          state.stability_days,
+          state.due_at,
+          state.last_reviewed_at,
+          state.repetitions,
+          state.lapses};
+}
+
+reviewfault::MemoryScheduleState to_cpp_memory_state(
+    const rf_memory_schedule_state_v2& state) {
+  return {static_cast<reviewfault::CardState>(state.state),
+          state.difficulty,
+          state.stability_days,
+          state.due_at,
+          state.last_reviewed_at,
+          state.repetitions,
+          state.lapses};
+}
+
+rf_memory_review_event_v2 to_c_memory_event(
+    const reviewfault::MemoryReviewEvent& event) {
+  return {sizeof(rf_memory_review_event_v2),
+          event.algorithm_version,
+          event.parameter_version,
+          static_cast<int32_t>(event.rating),
+          static_cast<int32_t>(event.preset),
+          static_cast<int32_t>(event.state_before),
+          static_cast<int32_t>(event.state_after),
+          event.reviewed_at,
+          event.due_at_before,
+          event.due_at_after,
+          event.target_retention,
+          event.elapsed_days,
+          event.scheduled_days,
+          event.retrievability_before,
+          event.difficulty_before,
+          event.difficulty_after,
+          event.stability_before,
+          event.stability_after};
+}
+
+rf_math_schedule_state_v2 to_c_math_state(
+    const reviewfault::MathScheduleState& state) {
+  return {sizeof(rf_math_schedule_state_v2),
+          state.mastery_level,
+          state.fluent_streak,
+          state.due_at,
+          state.last_reviewed_at,
+          state.repetitions};
+}
+
+reviewfault::MathScheduleState to_cpp_math_state(
+    const rf_math_schedule_state_v2& state) {
+  return {state.mastery_level, state.fluent_streak, state.due_at,
+          state.last_reviewed_at, state.repetitions};
+}
+
+rf_math_review_event_v2 to_c_math_event(
+    const reviewfault::MathReviewEvent& event) {
+  return {sizeof(rf_math_review_event_v2),
+          event.algorithm_version,
+          event.parameter_version,
+          static_cast<int32_t>(event.requested_feedback),
+          static_cast<int32_t>(event.applied_feedback),
+          static_cast<int32_t>(event.error_reason),
+          static_cast<int32_t>(event.intensity),
+          event.hint_revealed ? 1 : 0,
+          event.mastery_before,
+          event.mastery_after,
+          event.fluent_streak_before,
+          event.fluent_streak_after,
+          event.reviewed_at,
+          event.due_at_before,
+          event.due_at_after,
+          event.scheduled_days};
+}
+
+template <typename Callable>
+int32_t invoke_v2(Callable callable, char* error_buffer, size_t error_buffer_size) {
+  try {
+    callable();
+    if (error_buffer != nullptr && error_buffer_size > 0) {
+      error_buffer[0] = '\0';
+    }
+    return 0;
+  } catch (const std::invalid_argument& error) {
+    write_error(error.what(), error_buffer, error_buffer_size);
+    return 1;
+  } catch (const std::exception& error) {
+    write_error(error.what(), error_buffer, error_buffer_size);
+    return 2;
+  } catch (...) {
+    write_error("unknown scheduler error", error_buffer, error_buffer_size);
+    return 3;
+  }
 }
 
 }  // namespace
@@ -138,6 +240,92 @@ int32_t rf_review(const rf_scheduler_config* config,
     write_error("unknown scheduler error", error_buffer, error_buffer_size);
     return 3;
   }
+}
+
+size_t rf_memory_schedule_state_v2_size(void) {
+  return sizeof(rf_memory_schedule_state_v2);
+}
+
+size_t rf_memory_review_result_v2_size(void) {
+  return sizeof(rf_memory_review_result_v2);
+}
+
+size_t rf_math_schedule_state_v2_size(void) {
+  return sizeof(rf_math_schedule_state_v2);
+}
+
+size_t rf_math_review_result_v2_size(void) {
+  return sizeof(rf_math_review_result_v2);
+}
+
+rf_memory_schedule_state_v2 rf_new_memory_state_v2(void) {
+  return to_c_memory_state(reviewfault::MemoryScheduleState{});
+}
+
+rf_math_schedule_state_v2 rf_new_math_state_v2(void) {
+  return to_c_math_state(reviewfault::MathScheduleState{});
+}
+
+int32_t rf_review_memory_v2(const rf_memory_schedule_state_v2* state,
+                            const rf_memory_review_input_v2* input,
+                            rf_memory_review_result_v2* result,
+                            char* error_buffer,
+                            size_t error_buffer_size) {
+  return invoke_v2([&] {
+    if (state == nullptr || input == nullptr || result == nullptr) {
+      throw std::invalid_argument("state, input, and result are required");
+    }
+    if (state->struct_size != sizeof(*state) || input->struct_size != sizeof(*input) ||
+        result->struct_size != sizeof(*result)) {
+      throw std::invalid_argument("ABI v2 structure size mismatch");
+    }
+    const auto reviewed = reviewfault::review_memory_v2(
+        to_cpp_memory_state(*state),
+        {static_cast<reviewfault::Rating>(input->rating), input->reviewed_at,
+         static_cast<reviewfault::MemoryPreset>(input->preset)});
+    result->state = to_c_memory_state(reviewed.state);
+    result->event = to_c_memory_event(reviewed.event);
+  }, error_buffer, error_buffer_size);
+}
+
+int32_t rf_review_math_v2(const rf_math_schedule_state_v2* state,
+                          const rf_math_attempt_input_v2* input,
+                          rf_math_review_result_v2* result,
+                          char* error_buffer,
+                          size_t error_buffer_size) {
+  return invoke_v2([&] {
+    if (state == nullptr || input == nullptr || result == nullptr) {
+      throw std::invalid_argument("state, input, and result are required");
+    }
+    if (state->struct_size != sizeof(*state) || input->struct_size != sizeof(*input) ||
+        result->struct_size != sizeof(*result)) {
+      throw std::invalid_argument("ABI v2 structure size mismatch");
+    }
+    const auto reviewed = reviewfault::review_math_v2(
+        to_cpp_math_state(*state),
+        {static_cast<reviewfault::MathFeedback>(input->feedback),
+         static_cast<reviewfault::MathErrorReason>(input->error_reason),
+         input->hint_revealed != 0, input->reviewed_at,
+         static_cast<reviewfault::MathIntensity>(input->intensity)});
+    result->state = to_c_math_state(reviewed.state);
+    result->event = to_c_math_event(reviewed.event);
+  }, error_buffer, error_buffer_size);
+}
+
+int32_t review_memory_v2(const rf_memory_schedule_state_v2* state,
+                         const rf_memory_review_input_v2* input,
+                         rf_memory_review_result_v2* result,
+                         char* error_buffer,
+                         size_t error_buffer_size) {
+  return rf_review_memory_v2(state, input, result, error_buffer, error_buffer_size);
+}
+
+int32_t review_math_v2(const rf_math_schedule_state_v2* state,
+                       const rf_math_attempt_input_v2* input,
+                       rf_math_review_result_v2* result,
+                       char* error_buffer,
+                       size_t error_buffer_size) {
+  return rf_review_math_v2(state, input, result, error_buffer, error_buffer_size);
 }
 
 }  // extern "C"

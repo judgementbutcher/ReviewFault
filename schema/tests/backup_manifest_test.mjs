@@ -4,6 +4,9 @@ import { readFileSync } from 'node:fs';
 const schema = JSON.parse(readFileSync(
   new URL('../backup-v1.schema.json', import.meta.url), 'utf8',
 ));
+const schemaV2 = JSON.parse(readFileSync(
+  new URL('../backup-v2.schema.json', import.meta.url), 'utf8',
+));
 assert.equal(schema.properties.format.const, 'reviewfault-backup');
 assert.equal(schema.properties.version.const, 1);
 assert.equal(schema.properties.schemaVersion.const, 1);
@@ -21,6 +24,15 @@ assert(!pathPattern.test('media/../secret'));
 assert(!pathPattern.test('media/../../secret'));
 assert(hashPattern.test('a'.repeat(64)));
 assert(!hashPattern.test('A'.repeat(64)));
+
+assert.equal(schemaV2.properties.version.const, 2);
+assert.equal(schemaV2.properties.schemaVersion.const, 2);
+assert.equal(schemaV2.properties.schedulerAbiVersion.const, 2);
+assert(schemaV2.required.includes('appVersion'));
+const appVersionPattern = new RegExp(schemaV2.properties.appVersion.pattern);
+assert(appVersionPattern.test('0.2.0'));
+assert(appVersionPattern.test('0.2.1-rc1'));
+assert(!appVersionPattern.test('0.1.0'));
 
 const implementations = [
   '../../apps/android/app/src/main/java/cn/reviewfault/app/data/AppDatabase.kt',

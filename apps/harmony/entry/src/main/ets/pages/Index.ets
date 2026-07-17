@@ -3,7 +3,7 @@ import { promptAction } from '@kit.ArkUI';
 import { photoAccessHelper } from '@kit.MediaLibraryKit';
 import { picker } from '@kit.CoreFileKit';
 import { camera, cameraPicker } from '@kit.CameraKit';
-import { AppRepository, DashboardSummary, StudyRow } from '../data/AppRepository';
+import { AppRepository, DashboardSummary, StudyRow, LearningPreferences } from '../data/AppRepository';
 
 @Entry
 @Component
@@ -28,6 +28,10 @@ struct Index {
   @State private library: StudyRow[] = [];
   @State private currentMediaPaths: string[] = [];
   @State private shownHintCount: number = 0;
+  @State private dailyNewLimit: string = '20';
+  @State private sessionMinutes: string = '20';
+  @State private memoryPresetIndex: number = 1;
+  @State private mathIntensityIndex: number = 1;
 
   async aboutToAppear(): Promise<void> {
     try {
@@ -70,8 +74,11 @@ struct Index {
     }
     try {
       const reviewedAt = Math.floor(Date.now() / 1000);
+      const reasons: (string | undefined)[] = [undefined, 'concept', 'approach', 'calculation',
+        'misread', 'forgotten_fact', 'timeout', 'other'];
       const result = await this.repository.review(
-        this.current, rating, reviewedAt, reviewedAt - this.reviewStartedAt, mathResult);
+        this.current, rating, reviewedAt, reviewedAt - this.reviewStartedAt, mathResult,
+        mathResult === 'wrong' ? reasons[this.errorReasonIndex] : undefined);
       promptAction.showToast({ message: `已保存，下次约 ${this.formatInterval(result.scheduledDays)} 后` });
       await this.beginReview();
     } catch (error) {
@@ -175,6 +182,41 @@ struct Index {
     } catch (error) {
       promptAction.showToast({ message: (error as Error).message, duration: 4000 });
     }
+  }
+
+  async showSettings(): Promise<void> {
+    const value = await this.repository.learningPreferences();
+    this.dailyNewLimit = value.dailyNewMemoryLimit.toString();
+    this.sessionMinutes = value.sessionMinutes.toString();
+    this.memoryPresetIndex = value.memoryPreset === 'time_saving' ? 0 : value.memoryPreset === 'reinforced' ? 2 : 1;
+    this.mathIntensityIndex = value.mathIntensity === 'intensive' ? 0 : value.mathIntensity === 'relaxed' ? 2 : 1;
+    this.screen = 'settings';
+  }
+
+  async saveSettings(): Promise<void> {
+    const value: LearningPreferences = {
+      dailyNewMemoryLimit: Number(this.dailyNewLimit), sessionMinutes: Number(this.sessionMinutes),
+      memoryPreset: this.memoryPresetIndex === 0 ? 'time_saving' : this.memoryPresetIndex === 2 ? 'reinforced' : 'balanced',
+      mathIntensity: this.mathIntensityIndex === 0 ? 'intensive' : this.mathIntensityIndex === 2 ? 'relaxed' : 'balanced',
+    };
+    await this.repository.saveLearningPreferences(value);
+    promptAction.showToast({ message: '设置已保存，只影响之后的作答' });
+  }
+
+  async showTrash(): Promise<void> {
+    this.library = await this.repository.search('', true);
+    this.screen = 'trash';
+  }
+
+  async deleteCurrent(): Promise<void> {
+    if (this.current === undefined) return;
+    const id = this.current.id;
+    await this.repository.softDelete([id]);
+    const choice = await promptAction.showDialog({ title: '已移入回收站',
+      message: '复习日志和媒体仍会保留。',
+      buttons: [{ text: '完成', color: '#666666' }, { text: '撤销', color: '#315C49' }] });
+    if (choice.index === 1) await this.repository.restore([id]);
+    await this.refreshHome();
   }
 
   async openLibraryDetail(row: StudyRow): Promise<void> {
@@ -315,6 +357,7 @@ struct Index {
       Button('浏览 / 搜索题库').width('100%').onClick(() => {
         this.searchQuery = ''; this.showLibrary();
       })
+      Button('设置').width('100%').onClick(() => this.showSettings())
       Text('数据与备份').fontSize(20).fontWeight(FontWeight.Bold).fontColor('#1E362B').margin({ top: 8 })
       Button('导出完整备份').width('100%').onClick(() => this.exportBackup())
       Button('从备份恢复').width('100%').onClick(() => this.restoreBackup())
@@ -376,6 +419,10 @@ struct Index {
           .backgroundColor('#FFFFFF').borderRadius(14)
           Text('这次完成得怎样？').fontSize(18).fontWeight(FontWeight.Bold)
           if (this.current.kind === 'math_problem') {
+            Select([{ value: '错因：未选择' }, { value: '错因：概念' }, { value: '错因：思路' },
+              { value: '错因：计算' }, { value: '错因：审题' }, { value: '错因：遗忘结论' },
+              { value: '错因：超时' }, { value: '错因：其他' }])
+              .selected(this.errorReasonIndex).onSelect((index) => this.errorReasonIndex = index)
             Row({ space: 6 }) {
               Button('不会').layoutWeight(1).onClick(() => this.score(1, 'again'))
               Button('做错').layoutWeight(1).onClick(() => this.score(1, 'wrong'))
@@ -392,6 +439,7 @@ struct Index {
           }
         }
         Button('返回首页').width('100%').onClick(() => this.refreshHome())
+        Button('删除此内容').width('100%').onClick(() => this.deleteCurrent())
       }
     }
   }
@@ -501,7 +549,44 @@ struct Index {
           })
         }
         Button('返回题库').width('100%').onClick(() => this.showLibrary())
+        Button('移入回收站').width('100%').onClick(() => this.deleteCurrent())
       }
+    }
+  }
+
+  @Builder
+  settingsScreen() {
+    Column({ space: 14 }) {
+      Text('设置').fontSize(28).fontWeight(FontWeight.Bold).fontColor('#1E362B')
+      Text('学习与算法').fontSize(20).fontWeight(FontWeight.Bold)
+      TextInput({ placeholder: '每日新 408 上限', text: this.dailyNewLimit })
+        .type(InputType.Number).onChange((value) => this.dailyNewLimit = value)
+      TextInput({ placeholder: '单次学习时长（分钟）', text: this.sessionMinutes })
+        .type(InputType.Number).onChange((value) => this.sessionMinutes = value)
+      Select([{ value: '省时 · 85%' }, { value: '均衡 · 90%' }, { value: '强化 · 93%' }])
+        .selected(this.memoryPresetIndex).onSelect((index) => this.memoryPresetIndex = index)
+      Select([{ value: '密集 · 0.75×' }, { value: '均衡 · 1.0×' }, { value: '舒缓 · 1.25×' }])
+        .selected(this.mathIntensityIndex).onSelect((index) => this.mathIntensityIndex = index)
+      Button('保存设置').width('100%').backgroundColor('#315C49').onClick(() => this.saveSettings())
+      Text('外观与提醒时间保存在本设备，不会被备份恢复覆盖。').fontSize(14).fontColor('#666666')
+      Button('回收站').width('100%').onClick(() => this.showTrash())
+      Button('返回今日').width('100%').onClick(() => this.refreshHome())
+    }
+  }
+
+  @Builder
+  trashScreen() {
+    Column({ space: 14 }) {
+      Text('回收站').fontSize(28).fontWeight(FontWeight.Bold).fontColor('#1E362B')
+      Text('没有永久清除；历史与媒体保持完整。').fontSize(14).fontColor('#666666')
+      ForEach(this.library, (row: StudyRow) => {
+        Column({ space: 8 }) {
+          Text(row.prompt.length === 0 ? '图片题面' : row.prompt).fontSize(17)
+          Button('恢复').onClick(async () => { await this.repository.restore([row.id]); await this.showTrash(); })
+        }.alignItems(HorizontalAlign.Start).width('100%').padding(16)
+          .backgroundColor('#FFFFFF').borderRadius(12)
+      }, (row: StudyRow) => row.id)
+      Button('返回设置').width('100%').onClick(() => this.showSettings())
     }
   }
 
@@ -537,6 +622,10 @@ struct Index {
           this.libraryDetailScreen()
         } else if (this.screen === 'memoryEdit') {
           this.memoryEditScreen()
+        } else if (this.screen === 'settings') {
+          this.settingsScreen()
+        } else if (this.screen === 'trash') {
+          this.trashScreen()
         } else {
           this.mathEditor()
         }

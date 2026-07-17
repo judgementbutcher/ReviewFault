@@ -1,9 +1,10 @@
 cmake_minimum_required(VERSION 3.20)
-project(ReviewFaultCore VERSION 0.1.0 LANGUAGES CXX)
+project(ReviewFaultCore VERSION 0.2.0 LANGUAGES CXX)
 
 add_library(reviewfault_core
   core/src/domain.cpp
   core/src/scheduler.cpp
+  core/src/scheduler_v2.cpp
   core/src/reviewfault_c.cpp
 )
 target_include_directories(reviewfault_core PUBLIC core/include)
@@ -26,4 +27,8 @@ if(REVIEWFAULT_BUILD_TESTS)
   add_executable(reviewfault_domain_tests core/tests/domain_test.cpp)
   target_link_libraries(reviewfault_domain_tests PRIVATE reviewfault_core)
   add_test(NAME reviewfault_domain_tests COMMAND reviewfault_domain_tests)
+
+  add_executable(reviewfault_v2_scheduler_tests core/tests/scheduler_v2_test.cpp)
+  target_link_libraries(reviewfault_v2_scheduler_tests PRIVATE reviewfault_core)
+  add_test(NAME reviewfault_v2_scheduler_tests COMMAND reviewfault_v2_scheduler_tests)
 endif()

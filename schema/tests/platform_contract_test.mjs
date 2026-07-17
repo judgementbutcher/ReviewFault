@@ -29,14 +29,19 @@ for (const platform of platforms) {
   for (const token of [
     'review_log', 'attempt', 'memory_card', 'math_problem', 'scheduler_state',
     'foreign_key_check', 'integrity_check', 'reviewfault-backup',
+    'learning_preferences', 'review_event_v2', 'memory_schedule_state',
+    'math_schedule_state', 'deleted_at',
   ]) {
     assert(repository.includes(token), `${platform.name} repository is missing ${token}`);
   }
-  for (const token of ['搜索', '数学', '408', '备份', '恢复', '答案']) {
+  for (const token of ['搜索', '数学', '408', '备份', '恢复', '答案', '设置', '回收站']) {
     assert(ui.includes(token), `${platform.name} UI is missing ${token}`);
   }
   for (const token of ['abi', 'review']) {
     assert(binding.toLowerCase().includes(token), `${platform.name} binding is missing ${token}`);
+  }
+  for (const token of ['memory', 'math', 'v2']) {
+    assert(binding.toLowerCase().includes(token), `${platform.name} v2 binding is missing ${token}`);
   }
 }
 

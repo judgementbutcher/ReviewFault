@@ -18,7 +18,7 @@
 extern "C" {
 #endif
 
-#define RF_SCHEDULER_ABI_VERSION 1u
+#define RF_SCHEDULER_ABI_VERSION 2u
 
 typedef enum rf_rating {
   RF_RATING_AGAIN = 1,
@@ -91,6 +91,157 @@ RF_API int32_t rf_review(const rf_scheduler_config* config,
                          rf_review_result* result,
                          char* error_buffer,
                          size_t error_buffer_size);
+
+/* ABI v2 keeps the v1 entry points above for history replay, but new reviews
+ * use a type-specific state and result. Every structure is size-versioned so
+ * an old application fails safely instead of reading a changed layout. */
+typedef enum rf_memory_preset_v2 {
+  RF_MEMORY_TIME_SAVING = 0,
+  RF_MEMORY_BALANCED = 1,
+  RF_MEMORY_REINFORCED = 2
+} rf_memory_preset_v2;
+
+typedef enum rf_math_intensity_v2 {
+  RF_MATH_INTENSIVE = 0,
+  RF_MATH_BALANCED = 1,
+  RF_MATH_RELAXED = 2
+} rf_math_intensity_v2;
+
+typedef enum rf_math_feedback_v2 {
+  RF_MATH_CANNOT_START = 0,
+  RF_MATH_INCORRECT = 1,
+  RF_MATH_EFFORTFUL_CORRECT = 2,
+  RF_MATH_FLUENT_CORRECT = 3
+} rf_math_feedback_v2;
+
+typedef enum rf_math_error_reason_v2 {
+  RF_MATH_ERROR_NONE = 0,
+  RF_MATH_ERROR_CONCEPT = 1,
+  RF_MATH_ERROR_APPROACH = 2,
+  RF_MATH_ERROR_CALCULATION = 3,
+  RF_MATH_ERROR_MISREAD = 4,
+  RF_MATH_ERROR_FORGOTTEN_FACT = 5,
+  RF_MATH_ERROR_TIMEOUT = 6,
+  RF_MATH_ERROR_OTHER = 7
+} rf_math_error_reason_v2;
+
+typedef struct rf_memory_schedule_state_v2 {
+  uint32_t struct_size;
+  int32_t state;
+  double difficulty;
+  double stability_days;
+  int64_t due_at;
+  int64_t last_reviewed_at;
+  uint32_t repetitions;
+  uint32_t lapses;
+} rf_memory_schedule_state_v2;
+
+typedef struct rf_memory_review_input_v2 {
+  uint32_t struct_size;
+  int32_t rating;
+  int32_t preset;
+  int64_t reviewed_at;
+} rf_memory_review_input_v2;
+
+typedef struct rf_memory_review_event_v2 {
+  uint32_t struct_size;
+  uint32_t algorithm_version;
+  uint32_t parameter_version;
+  int32_t rating;
+  int32_t preset;
+  int32_t state_before;
+  int32_t state_after;
+  int64_t reviewed_at;
+  int64_t due_at_before;
+  int64_t due_at_after;
+  double target_retention;
+  double elapsed_days;
+  double scheduled_days;
+  double retrievability_before;
+  double difficulty_before;
+  double difficulty_after;
+  double stability_before;
+  double stability_after;
+} rf_memory_review_event_v2;
+
+typedef struct rf_memory_review_result_v2 {
+  uint32_t struct_size;
+  rf_memory_schedule_state_v2 state;
+  rf_memory_review_event_v2 event;
+} rf_memory_review_result_v2;
+
+typedef struct rf_math_schedule_state_v2 {
+  uint32_t struct_size;
+  uint32_t mastery_level;
+  uint32_t fluent_streak;
+  int64_t due_at;
+  int64_t last_reviewed_at;
+  uint32_t repetitions;
+} rf_math_schedule_state_v2;
+
+typedef struct rf_math_attempt_input_v2 {
+  uint32_t struct_size;
+  int32_t feedback;
+  int32_t error_reason;
+  int32_t hint_revealed;
+  int32_t intensity;
+  int64_t reviewed_at;
+} rf_math_attempt_input_v2;
+
+typedef struct rf_math_review_event_v2 {
+  uint32_t struct_size;
+  uint32_t algorithm_version;
+  uint32_t parameter_version;
+  int32_t requested_feedback;
+  int32_t applied_feedback;
+  int32_t error_reason;
+  int32_t intensity;
+  int32_t hint_revealed;
+  uint32_t mastery_before;
+  uint32_t mastery_after;
+  uint32_t fluent_streak_before;
+  uint32_t fluent_streak_after;
+  int64_t reviewed_at;
+  int64_t due_at_before;
+  int64_t due_at_after;
+  double scheduled_days;
+} rf_math_review_event_v2;
+
+typedef struct rf_math_review_result_v2 {
+  uint32_t struct_size;
+  rf_math_schedule_state_v2 state;
+  rf_math_review_event_v2 event;
+} rf_math_review_result_v2;
+
+RF_API size_t rf_memory_schedule_state_v2_size(void);
+RF_API size_t rf_memory_review_result_v2_size(void);
+RF_API size_t rf_math_schedule_state_v2_size(void);
+RF_API size_t rf_math_review_result_v2_size(void);
+RF_API rf_memory_schedule_state_v2 rf_new_memory_state_v2(void);
+RF_API rf_math_schedule_state_v2 rf_new_math_state_v2(void);
+
+RF_API int32_t rf_review_memory_v2(const rf_memory_schedule_state_v2* state,
+                                   const rf_memory_review_input_v2* input,
+                                   rf_memory_review_result_v2* result,
+                                   char* error_buffer,
+                                   size_t error_buffer_size);
+RF_API int32_t rf_review_math_v2(const rf_math_schedule_state_v2* state,
+                                 const rf_math_attempt_input_v2* input,
+                                 rf_math_review_result_v2* result,
+                                 char* error_buffer,
+                                 size_t error_buffer_size);
+
+/* Unprefixed names are specified by the cross-platform v2 contract. */
+RF_API int32_t review_memory_v2(const rf_memory_schedule_state_v2* state,
+                                const rf_memory_review_input_v2* input,
+                                rf_memory_review_result_v2* result,
+                                char* error_buffer,
+                                size_t error_buffer_size);
+RF_API int32_t review_math_v2(const rf_math_schedule_state_v2* state,
+                              const rf_math_attempt_input_v2* input,
+                              rf_math_review_result_v2* result,
+                              char* error_buffer,
+                              size_t error_buffer_size);
 
 #ifdef __cplusplus
 }

@@ -1,0 +1,6 @@
+# ReviewFault Mastery Ladder v2, parameter version 1.
+case	mastery	streak	due	last	repetitions	feedback	reason	hint	reviewed_at	intensity	out_mastery	out_streak	out_due	out_repetitions	scheduled_days	applied_feedback
+new_effortful	0	0	0	0	0	2	0	0	1800000000	1	1	0	1800259200	1	3	2
+level4_calculation	4	3	1800000000	1799913600	7	1	3	0	1800000000	1	3	0	1800172800	8	2	1
+level4_fluent_intensive	4	3	1800000000	1799913600	7	3	0	0	1800000000	0	5	4	1803888000	8	45	3
+level4_hinted_fluent	4	3	1800000000	1799913600	7	3	0	1	1800000000	1	4	0	1802592000	8	30	2

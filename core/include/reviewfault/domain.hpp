@@ -1,10 +1,12 @@
 #pragma once
 
 #include "reviewfault/scheduler.hpp"
+#include "reviewfault/scheduler_v2.hpp"
 
 #include <cstddef>
 #include <cstdint>
 #include <string>
+#include <utility>
 #include <vector>
 
 namespace reviewfault {
@@ -54,9 +56,53 @@ struct MathProblemDraft {
   std::size_t solution_image_count = 0;
 };
 
+struct LearningPreferences {
+  std::uint32_t daily_new_memory_limit = 20;
+  std::uint32_t session_minutes = 20;
+  bool enable_data_structures = true;
+  bool enable_computer_organization = true;
+  bool enable_operating_systems = true;
+  bool enable_computer_networks = true;
+  bool include_memory_cards = true;
+  bool include_math_problems = true;
+  MemoryPreset memory_preset = MemoryPreset::Balanced;
+  MathIntensity math_intensity = MathIntensity::Balanced;
+};
+
+enum class LibraryStatus : std::int32_t {
+  All = 0,
+  New = 1,
+  Due = 2,
+  Suspended = 3,
+};
+
+struct LibraryFilter {
+  std::string query;
+  std::vector<std::string> subjects;
+  std::vector<StudyKind> kinds;
+  std::vector<std::string> tag_ids;
+  LibraryStatus status = LibraryStatus::All;
+  bool include_deleted = false;
+  std::uint32_t offset = 0;
+  std::uint32_t limit = 50;
+};
+
+struct DeletionState {
+  std::vector<std::string> item_ids;
+  std::int64_t deleted_at = 0;
+  std::int64_t undo_until = 0;
+
+  [[nodiscard]] bool can_undo(std::int64_t now) const {
+    return deleted_at > 0 && now >= deleted_at && now <= undo_until;
+  }
+};
+
 [[nodiscard]] std::vector<ValidationError> validate(const MemoryCardDraft& draft);
 [[nodiscard]] std::vector<ValidationError> validate(const MathProblemDraft& draft);
 [[nodiscard]] Rating scheduler_rating(MathAttemptResult result);
+[[nodiscard]] std::vector<ValidationError> validate(
+    const LearningPreferences& preferences);
+[[nodiscard]] std::vector<ValidationError> validate(const LibraryFilter& filter);
 
 enum class QueueSection : std::int32_t {
   Overdue = 0,
@@ -71,6 +117,22 @@ struct QueueCandidate {
   std::int64_t due_at = 0;
   std::uint32_t estimated_seconds = 0;
   bool suspended = false;
+  std::string chapter_id;
+  bool deleted = false;
+
+  QueueCandidate() = default;
+  QueueCandidate(std::string item_id, StudyKind item_kind, CardState state,
+                 std::int64_t item_due_at, std::uint32_t estimate,
+                 bool is_suspended, std::string item_chapter_id = {},
+                 bool is_deleted = false)
+      : id(std::move(item_id)),
+        kind(item_kind),
+        scheduler_state(state),
+        due_at(item_due_at),
+        estimated_seconds(estimate),
+        suspended(is_suspended),
+        chapter_id(std::move(item_chapter_id)),
+        deleted(is_deleted) {}
 };
 
 struct QueuePlanConfig {
@@ -97,4 +159,3 @@ struct QueuePlan {
                                    const QueuePlanConfig& config);
 
 }  // namespace reviewfault
-

@@ -43,6 +43,14 @@ int main() {
   const auto review = load<int32_t (*)(const rf_scheduler_config*, const rf_card*,
                                        int32_t, int64_t, rf_review_result*, char*, size_t)>(
       library, "rf_review");
+  const auto memory_v2 = load<int32_t (*)(const rf_memory_schedule_state_v2*,
+                                           const rf_memory_review_input_v2*,
+                                           rf_memory_review_result_v2*, char*, size_t)>(
+      library, "review_memory_v2");
+  const auto math_v2 = load<int32_t (*)(const rf_math_schedule_state_v2*,
+                                         const rf_math_attempt_input_v2*,
+                                         rf_math_review_result_v2*, char*, size_t)>(
+      library, "review_math_v2");
 
   if (abi_version() != RF_SCHEDULER_ABI_VERSION ||
       config_size() != sizeof(rf_scheduler_config) || card_size() != sizeof(rf_card) ||
@@ -65,8 +73,34 @@ int main() {
     dlclose(library);
     return EXIT_FAILURE;
   }
+
+  auto memory_state = load<rf_memory_schedule_state_v2 (*)()>(
+      library, "rf_new_memory_state_v2")();
+  rf_memory_review_input_v2 memory_input{sizeof(memory_input), RF_RATING_GOOD,
+                                         RF_MEMORY_BALANCED, 1'800'000'000};
+  rf_memory_review_result_v2 memory_result{};
+  memory_result.struct_size = sizeof(memory_result);
+  if (memory_v2(&memory_state, &memory_input, &memory_result, error, sizeof(error)) != 0 ||
+      memory_result.state.state != RF_CARD_REVIEW) {
+    std::cerr << "dynamic memory v2 ABI review failed: " << error << '\n';
+    dlclose(library);
+    return EXIT_FAILURE;
+  }
+
+  auto math_state = load<rf_math_schedule_state_v2 (*)()>(library,
+                                                           "rf_new_math_state_v2")();
+  rf_math_attempt_input_v2 math_input{sizeof(math_input), RF_MATH_FLUENT_CORRECT,
+                                      RF_MATH_ERROR_NONE, 0, RF_MATH_BALANCED,
+                                      1'800'000'000};
+  rf_math_review_result_v2 math_result{};
+  math_result.struct_size = sizeof(math_result);
+  if (math_v2(&math_state, &math_input, &math_result, error, sizeof(error)) != 0 ||
+      math_result.state.mastery_level != 1) {
+    std::cerr << "dynamic math v2 ABI review failed: " << error << '\n';
+    dlclose(library);
+    return EXIT_FAILURE;
+  }
   dlclose(library);
   std::cout << "Dynamic C ABI tests passed\n";
   return EXIT_SUCCESS;
 }
-

@@ -1,14 +1,15 @@
-# 备份与恢复协议 v1
+# 备份与恢复协议 v2
 
-`.reviewfault` 文件是 ZIP 容器，至少包含 `manifest.json` 与 `database.sqlite`；媒体按数据库中的相对路径放在 `media/`。清单结构由 `schema/backup-v1.schema.json` 固定。
+`.reviewfault` 是 ZIP 容器，至少包含 `manifest.json` 与 `database.sqlite`，媒体位于
+`media/`。v2 清单由 `schema/backup-v2.schema.json` 固定，声明应用 0.2.x、schema 2、
+调度 ABI 2，并为每个负载保存 SHA-256 和字节数。
 
-导出前必须完成 SQLite checkpoint，随后计算每个文件的 SHA-256 与字节数。恢复时必须先解压到应用缓存中的随机目录，并依次验证：
+恢复顺序为：安全路径解压、版本组合校验、逐文件长度/哈希校验、SQLite
+`integrity_check`、`foreign_key_check`，最后以可回滚事务替换本地数据。v0.2 接受：
 
-1. ZIP 路径不能逃逸临时目录；
-2. 格式版本、schema 版本与调度 ABI 兼容；
-3. 清单列出的每个文件长度和 SHA-256 相符；
-4. `PRAGMA integrity_check` 返回 `ok`；
-5. `PRAGMA foreign_key_check` 没有结果；
-6. 替换失败时回滚到原数据库与媒体。
+- manifest/schema/ABI `1/1/1`，恢复后立即执行 `002_v0_2.sql`；
+- manifest/schema/ABI `2/2/2`，直接恢复。
 
-Android、Windows 与鸿蒙均实现协议 v1。鸿蒙端使用官方 `RdbStore.backup/restore` 创建和恢复一致性快照，使用 `zlib.compressFiles/decompressFile` 处理 ZIP，并通过 `DocumentViewPicker` 与用户选择的位置交换文件；最低兼容 API 13，以获得系统压缩组件的路径穿越防护。
+其他组合和损坏文件在替换本地数据库之前拒绝。媒体包括已软删除内容的文件。学习设置
+随 SQLite 恢复；主题、提醒时间和通知权限不得被恢复覆盖。v0.1 必须依据未知 manifest
+版本安全拒绝 v2，而不是尝试打开或覆盖本地数据。

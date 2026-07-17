@@ -2,7 +2,7 @@
 
 ReviewFault 是面向考研数学与 408 的本地优先间隔学习软件。它不是把两类内容都压成普通闪卡：数学侧强调低摩擦记录、重做与错因复盘；408 侧强调主动回忆、分层提示与知识点关联。
 
-当前仓库包含共享核心和三个原生 MVP：
+当前版本为 **0.2.0**（schema v2、调度 ABI v2、备份协议 v2），包含共享核心和三个原生客户端：
 
 - 鸿蒙：ArkTS + ArkUI
 - Android：Kotlin + Jetpack Compose
@@ -29,16 +29,22 @@ Android 调试 APK 在完成 Android 构建后位于 `apps/android/app/build/out
 - [备份与恢复协议](docs/backup.md)
 - [构建与验证](docs/building.md)
 - [需求验证矩阵](docs/verification.md)
+- [视觉与无障碍 token](docs/design-tokens.md)
 
-`fixtures/scheduler_v1.tsv` 是跨端黄金样例。JNI、NAPI 和 P/Invoke 绑定只有在相同输入产生相同状态与 UTC 到期秒时才算接入完成。
+`fixtures/scheduler_v1.tsv` 保留用于历史重放；`fixtures/memory_scheduler_v2.tsv` 与
+`fixtures/math_scheduler_v2.tsv` 是两套跨端黄金样例。JNI、NAPI 和 P/Invoke 绑定只有在
+相同输入产生相同状态与 UTC 到期秒时才算接入完成。
 
-## MVP 已实现
+## v0.2 已实现
 
-- 今日队列、每天 20 个新内容上限、数学/408 差异化评分；
+- 今日—题库—添加—设置的信息结构、每天 20 个新 408 默认上限；
+- 408 FSRS-6 与数学 Mastery Ladder 两套独立调度路径；
+- 题库分页/筛选契约、标签、软删除、短时撤销与回收站恢复；
+- 学习/算法设置以及设备独立的外观和提醒设置；
 - 数学图片或文本录入、错因/错误步骤/关键提示、搜索和重做历史；
 - 408 问答、填空、分层提示、枚举与对比卡；
 - 完全离线的 SQLite 数据、不可变复习日志；
-- 三端 `.reviewfault` 完整备份与恢复；
+- 三端 `.reviewfault` v2 完整备份与 v1/v2 恢复；
 - Android JNI、HarmonyOS NAPI、Windows P/Invoke 共用同一调度核心。
 
-尚未纳入首版 UI：图示遮挡编辑器、OCR、云同步与跨设备自动同步。这些不影响离线学习闭环，但发布前仍必须完成三套平台 SDK 构建和真机互恢复验收。
+仍不纳入 v0.2：永久清除、图示遮挡编辑器、OCR、云同步、个人参数训练与跨设备自动同步。发布前仍必须完成三套平台 SDK 构建和真机互恢复验收。

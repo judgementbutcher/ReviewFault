@@ -44,6 +44,31 @@ try
         next!.Kind == "math_problem" ? "effortful" : null);
     Require(result.Card.State == CardState.Review, "Good graduates the item to review");
     Require(result.Card.DueAt > reviewedAt, "review produces a future due time");
+    await repository.ReplaceTagsAsync(cardId, new[] { "进程", "易混" });
+    var preferences = await repository.GetLearningPreferencesAsync();
+    await repository.SaveLearningPreferencesAsync(preferences with {
+        DailyNewMemoryLimit = 12, MathIntensity = "intensive" });
+    Require((await repository.GetLearningPreferencesAsync()).DailyNewMemoryLimit == 12,
+        "learning settings persist in schema v2");
+    var deletion = await repository.SoftDeleteAsync(new[] { enumerationId });
+    Require((await repository.TrashAsync()).Any(item => item.Id == enumerationId) &&
+        deletion.UndoUntil > deletion.DeletedAt, "soft deletion enters recoverable trash");
+    await repository.RestoreAsync(new[] { enumerationId });
+    Require(!(await repository.TrashAsync()).Any(item => item.Id == enumerationId),
+        "trash item can be restored with its schedule");
+
+    await using (var audit = new Microsoft.Data.Sqlite.SqliteConnection(
+        $"Data Source={Path.Combine(root, "reviewfault.db")}"))
+    {
+        await audit.OpenAsync();
+        var command = audit.CreateCommand();
+        command.CommandText = "SELECT COUNT(*) FROM review_event_v2";
+        Require(Convert.ToInt32(await command.ExecuteScalarAsync()) == 1,
+            "new answers append v2 events instead of mutating v1 history");
+        command.CommandText = "PRAGMA user_version";
+        Require(Convert.ToInt32(await command.ExecuteScalarAsync()) == 2,
+            "repository initializes schema v2");
+    }
 
     await using var backup = new MemoryStream();
     await repository.ExportBackupAsync(backup);

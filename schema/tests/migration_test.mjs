@@ -6,6 +6,9 @@ const migration = readFileSync(
   new URL('../migrations/001_initial.sql', import.meta.url),
   'utf8',
 );
+const migrationV2 = readFileSync(
+  new URL('../migrations/002_v0_2.sql', import.meta.url), 'utf8',
+);
 
 const db = new DatabaseSync(':memory:');
 db.exec(migration);
@@ -50,6 +53,21 @@ assert.equal(
   androidDb.prepare("SELECT COUNT(*) AS count FROM sqlite_master WHERE type = 'trigger'").get().count,
   4,
   'Android one-statement execution also creates all triggers',
+);
+for (const statement of androidMigrationStatements(migrationV2)) {
+  androidDb.exec(statement);
+}
+assert.equal(androidDb.prepare('PRAGMA user_version').get().user_version, 0,
+  'platform parser leaves user_version management to SQLiteOpenHelper');
+assert.equal(
+  androidDb.prepare("SELECT COUNT(*) AS count FROM sqlite_master WHERE type = 'table'").get().count,
+  20,
+  'Android sequential execution creates all schema v2 tables',
+);
+assert.equal(
+  androidDb.prepare("SELECT COUNT(*) AS count FROM sqlite_master WHERE type = 'trigger'").get().count,
+  12,
+  'Android sequential execution creates v2 schedule and immutability triggers',
 );
 androidDb.close();
 

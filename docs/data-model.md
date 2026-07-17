@@ -1,37 +1,25 @@
-# 跨端数据契约（草案 v1）
+# 跨端数据契约 v2
 
-以下字段是 SQLite 与导出格式共同的语义模型。数据库迁移落地时不得复用已发布字段表达不同含义。
+schema v2 通过 `002_v0_2.sql` 从 v1 顺序升级，`001_initial.sql` 保持不变。升级保留
+所有旧 `due_at`；有历史的项目标记 `needs_history_replay=1`，第一次 v2 作答时由仓储
+回放 v1 `review_log`/`attempt` 后写回类型化状态。
 
-## 核心实体
+## 调度与事件
 
-### `study_item`
+- `schedule_state_v2`：队列需要的算法、版本、到期、复习次数与渐进迁移标记；
+- `memory_schedule_state`：408 的状态、难度、稳定性和 lapse；
+- `math_schedule_state`：数学熟练度与连续熟练次数；
+- `review_event_v2`：公共的算法、反馈、时间、预设和到期变化；
+- `memory_review_event_v2` / `math_review_event_v2`：类型专属证据；数学详情关联 `attempt`。
 
-所有可调度内容的公共部分：`id`、`kind`（`math_problem` / `memory_card`）、`subject`、`chapter_id`、`created_at`、`updated_at`、`suspended_at`、`scheduler_abi_version`，以及调度状态 `state`、`difficulty`、`stability_days`、`due_at`、`last_reviewed_at`、`repetitions`、`lapses`。
+三张 v2 事件表和旧 `review_log` 都由触发器禁止更新、删除。旧字段继续只读保留供
+审计与历史迁移，三端新作答只写 v2 事件。
 
-### `math_problem`
+## 设置、题库与删除
 
-`study_item_id`、来源信息、题面 Markdown、解答 Markdown、错误步骤、关键提示、默认错因。题面与解答图片通过 `media_ref` 排序关联。一次重做的结果写入 `attempt`，不覆盖旧记录。
+`learning_preferences` 保存可迁移的每日新 408 上限、学习时长、启用科目、队列类型、
+记忆预设和数学强度。主题、提醒时间与通知权限属于设备设置，不进入数据库恢复覆盖范围。
 
-### `memory_card`
-
-`study_item_id`、模板类型、题干、答案、提示数组、要点数组、遮挡定义和关联笔记 ID。模板专属字段在导出 JSON 中保持结构化，不能拼成一段不可逆文本。
-
-### `review_log`
-
-不可变事件：`id`、`study_item_id`、`reviewed_at`、`rating`、作答耗时、评分前后状态、当时的可提取率、设备 ID、算法 ABI 版本。`compensates_log_id` 为后续补偿撤销预留；首版不修改或删除已保存日志。
-
-### `attempt`
-
-数学重做详情：`id`、`math_problem_id`、开始/结束时间、结果、信心、错因、草稿媒体和复盘文字。它与调度评分关联，但两者不可互相替代。
-
-### `media`
-
-`id`、SHA-256、MIME、字节数、宽高/时长、创建时间、相对路径。业务实体仅保存引用，便于去重、迁移和缺失文件检查。
-
-## 约束
-
-- 所有时间点为有符号 64 位 UTC Unix 秒；持续时间明确带 `_seconds` 或 `_days` 后缀；
-- 所有 ID 在客户端生成，禁止依赖自增 ID 做跨设备身份；
-- 删除默认为墓碑，直到完成导出或同步清理；
-- 调度状态和对应 `review_log` 必须原子提交；
-- 导入前校验 schema 版本、哈希、引用完整性和数值范围。
+题库普通查询必须带 `study_item.deleted_at IS NULL`，支持科目、类型、标签、状态、
+`LIMIT/OFFSET`。删除只写墓碑并立即退出队列；恢复清除墓碑，保留原调度状态。媒体与
+不可变历史不随软删除清理，v0.2 没有永久清除入口。

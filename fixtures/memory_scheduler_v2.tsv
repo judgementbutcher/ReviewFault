@@ -1,0 +1,5 @@
+# ReviewFault Memory FSRS-6 v2, parameter version 1. UTC seconds are exact.
+case	state	difficulty	stability	due	last	repetitions	lapses	rating	reviewed_at	preset	out_state	out_difficulty	out_stability	out_due	out_repetitions	out_lapses	scheduled_days
+new_again	0	0	0	0	0	0	0	1	1800000000	1	1	6.4133	0.212	1800000600	1	0	0.006944444444444444
+new_hard	0	0	0	0	0	0	0	2	1800000000	1	1	5.112170705601055	1.2931	1800028800	1	0	0.3333333333333333
+new_good	0	0	0	0	0	0	0	3	1800000000	1	2	2.118103970459015	2.3065	1800199282	1	0	2.3065

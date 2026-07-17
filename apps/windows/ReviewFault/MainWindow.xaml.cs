@@ -18,11 +18,36 @@ public sealed class MainWindow : Window
     {
         Background = new SolidColorBrush(Windows.UI.Color.FromArgb(255, 247, 245, 239)),
     };
+    private readonly NavigationView Navigation = new()
+    {
+        PaneTitle = "ReviewFault",
+        IsBackButtonVisible = NavigationViewBackButtonVisible.Collapsed,
+        IsSettingsVisible = false,
+        PaneDisplayMode = NavigationViewPaneDisplayMode.Left,
+    };
     private bool initialized;
 
     public MainWindow()
     {
-        Content = Root;
+        Navigation.Content = Root;
+        Navigation.MenuItems.Add(new NavigationViewItem { Content = "今日", Tag = "today", Icon = new SymbolIcon(Symbol.Home) });
+        Navigation.MenuItems.Add(new NavigationViewItem { Content = "题库", Tag = "library", Icon = new SymbolIcon(Symbol.Library) });
+        Navigation.MenuItems.Add(new NavigationViewItem { Content = "添加", Tag = "add", Icon = new SymbolIcon(Symbol.Add) });
+        Navigation.MenuItems.Add(new NavigationViewItem { Content = "设置", Tag = "settings", Icon = new SymbolIcon(Symbol.Setting) });
+        Navigation.FooterMenuItems.Add(new NavigationViewItem { Content = "回收站", Tag = "trash", Icon = new SymbolIcon(Symbol.Delete) });
+        Navigation.SelectionChanged += async (_, args) =>
+        {
+            if (args.SelectedItemContainer?.Tag is not string destination) return;
+            switch (destination)
+            {
+                case "today": await ShowHomeAsync(); break;
+                case "library": await ShowLibraryAsync(""); break;
+                case "add": ShowAdd(); break;
+                case "settings": await ShowSettingsAsync(); break;
+                case "trash": await ShowTrashAsync(); break;
+            }
+        };
+        Content = Navigation;
         Title = "ReviewFault";
         AppWindow.Resize(new Windows.Graphics.SizeInt32(920, 720));
         Activated += async (_, _) =>
@@ -72,6 +97,59 @@ public sealed class MainWindow : Window
         panel.Children.Add(Heading("数据与备份", 20));
         panel.Children.Add(ActionButton("导出完整备份", ExportBackupAsync));
         panel.Children.Add(ActionButton("从备份恢复", RestoreBackupAsync));
+        SetPage(panel);
+    }
+
+    private void ShowAdd()
+    {
+        var panel = PagePanel();
+        panel.Children.Add(Heading("添加", 32));
+        panel.Children.Add(Body("快速记录数学题，或创建结构化 408 记忆卡。"));
+        panel.Children.Add(ActionButton("导入数学题面", PickMathImageAsync));
+        panel.Children.Add(ActionButton("新建 408 记忆卡", ShowMemoryEditorAsync));
+        SetPage(panel);
+    }
+
+    private async Task ShowSettingsAsync()
+    {
+        var current = await repository.GetLearningPreferencesAsync();
+        var newLimit = new NumberBox { Header = "每日新 408 上限", Value = current.DailyNewMemoryLimit,
+            Minimum = 0, Maximum = 500, SpinButtonPlacementMode = NumberBoxSpinButtonPlacementMode.Inline };
+        var minutes = new NumberBox { Header = "单次学习时长（分钟）", Value = current.SessionMinutes,
+            Minimum = 1, Maximum = 240, SpinButtonPlacementMode = NumberBoxSpinButtonPlacementMode.Inline };
+        var memory = new ComboBox { Header = "408 记忆预设", ItemsSource = new[] { "省时", "均衡", "强化" },
+            SelectedIndex = current.MemoryPreset switch { "time_saving" => 0, "reinforced" => 2, _ => 1 } };
+        var math = new ComboBox { Header = "数学复习强度", ItemsSource = new[] { "密集", "均衡", "舒缓" },
+            SelectedIndex = current.MathIntensity switch { "intensive" => 0, "relaxed" => 2, _ => 1 } };
+        var panel = PagePanel();
+        panel.Children.Add(Heading("设置", 32));
+        panel.Children.Add(Heading("学习与算法", 20));
+        panel.Children.Add(newLimit); panel.Children.Add(minutes); panel.Children.Add(memory); panel.Children.Add(math);
+        panel.Children.Add(ActionButton("保存学习设置", async () =>
+        {
+            await repository.SaveLearningPreferencesAsync(new LearningPreferences(
+                (int)newLimit.Value, (int)minutes.Value,
+                memory.SelectedIndex switch { 0 => "time_saving", 2 => "reinforced", _ => "balanced" },
+                math.SelectedIndex switch { 0 => "intensive", 2 => "relaxed", _ => "balanced" }, true, true));
+            await MessageAsync("设置已保存；只影响此后的作答。");
+        }));
+        panel.Children.Add(Heading("数据", 20));
+        panel.Children.Add(ActionButton("导出完整备份", ExportBackupAsync));
+        panel.Children.Add(ActionButton("从备份恢复", RestoreBackupAsync));
+        panel.Children.Add(Body("主题、提醒时间和通知权限保存在本设备，不会被备份恢复覆盖。"));
+        SetPage(panel);
+    }
+
+    private async Task ShowTrashAsync()
+    {
+        var rows = await repository.TrashAsync();
+        var panel = PagePanel();
+        panel.Children.Add(Heading("回收站", 32));
+        panel.Children.Add(Body("删除不会清除复习日志或媒体，可随时恢复。"));
+        if (rows.Count == 0) panel.Children.Add(Body("回收站为空"));
+        foreach (var row in rows)
+            panel.Children.Add(Card(Body(row.Prompt.Length == 0 ? "图片题面" : row.Prompt),
+                ActionButton("恢复", async () => { await repository.RestoreAsync(new[] { row.Id }); await ShowTrashAsync(); })));
         SetPage(panel);
     }
 

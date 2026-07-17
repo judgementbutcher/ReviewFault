@@ -22,18 +22,18 @@ reviewfault_core（C ABI：UTC 输入 → 调度结果）
 - `apps/harmony/`：ArkTS UI，使用 NAPI 封装核心。
 - `apps/android/`：Kotlin UI，使用 JNI 封装核心。
 - `apps/windows/`：C#/WinUI UI，使用 P/Invoke 封装核心 DLL。
-- `schema/`：版本化 SQLite 迁移；下一阶段增加跨端 JSON 导入导出 schema。
+- `schema/`：只追加的 SQLite 迁移与版本化备份 manifest schema。
 - `fixtures/`：各语言绑定必须通过的版本化黄金样例。
 
 ## 时间与一致性
 
-数据库中保存 UTC Unix 秒；时区只参与“今天”的展示和日界线计算。调度器不读取系统时钟，调用方显式传入 `reviewed_at`，因此测试可复现。服务层必须在同一事务中写入新卡片状态和不可变复习日志。
+数据库中保存 UTC Unix 秒；时区只参与“今天”的展示和日界线计算。调度器不读取系统时钟，调用方显式传入 `reviewed_at`，因此测试可复现。服务层必须在同一事务中写入类型化调度状态、数学 attempt 和不可变 v2 事件。
 
 跨端浮点计算统一使用 IEEE-754 `double`，最终到期时间量化到整数秒。C ABI 中只出现固定宽度整数、`double` 和 POD 结构体，并带 ABI 版本。
 
 ## 本地优先与未来同步
 
-每个业务实体使用 UUIDv7；编辑记录携带 `updated_at` 和设备 ID。媒体以内容哈希命名。首版先实现可校验的完整导出/恢复，再增加同步。复习日志只追加、不覆盖；普通文本字段可用 last-write-wins，标签和关联使用集合合并，媒体按哈希去重。冲突策略在启用同步前需要用双设备测试固定下来。
+每个业务实体使用 UUIDv7；编辑记录携带 `updated_at` 和设备 ID。媒体以内容哈希命名。v0.2 完全离线，复习事件只追加、不覆盖，媒体按哈希去重并随软删除内容保留；同步冲突策略不在本版本范围内。
 
 ## 隐私
 

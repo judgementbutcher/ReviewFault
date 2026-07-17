@@ -5,7 +5,7 @@ import { fileIo as fs } from '@kit.CoreFileKit';
 import { cryptoFramework } from '@kit.CryptoArchitectureKit';
 import { zlib } from '@kit.BasicServicesKit';
 import reviewfault from 'libreviewfault.so';
-import { NativeScheduler, ScheduleCard, ScheduleResult } from '../core/NativeScheduler';
+import { NativeScheduler, ScheduleCard, ScheduleResult, MathScheduleResult } from '../core/NativeScheduler';
 
 export interface DashboardSummary {
   overdue: number;
@@ -32,6 +32,13 @@ export interface StudyRow {
   structuredJson: string;
 }
 
+export interface LearningPreferences {
+  dailyNewMemoryLimit: number;
+  sessionMinutes: number;
+  memoryPreset: string;
+  mathIntensity: string;
+}
+
 interface BackupFileEntry {
   path: string;
   sha256: string;
@@ -41,6 +48,7 @@ interface BackupFileEntry {
 interface BackupManifest {
   format: string;
   version: number;
+  appVersion?: string;
   schemaVersion: number;
   schedulerAbiVersion: number;
   exportedAt: number;
@@ -48,6 +56,7 @@ interface BackupManifest {
 }
 
 export class AppRepository {
+  // v1 review_log is retained read-only for first-use v2 history replay.
   private static instance: AppRepository = new AppRepository();
   private store?: relationalStore.RdbStore;
 
@@ -79,11 +88,28 @@ export class AppRepository {
         }
         await this.store.executeSql('PRAGMA user_version = 1');
         this.store.commit();
+        version = 1;
       } catch (error) {
         this.store.rollBack();
         throw error;
       }
-    } else if (version !== 1) {
+    }
+    if (version === 1) {
+      const statements = AppRepository.migrationStatements(reviewfault.schemaV2());
+      this.store.beginTransaction();
+      try {
+        for (let index = 0; index < statements.length; index++) {
+          await this.store.executeSql(statements[index]);
+        }
+        await this.store.executeSql('PRAGMA user_version = 2');
+        this.store.commit();
+        version = 2;
+      } catch (error) {
+        this.store.rollBack();
+        throw error;
+      }
+    }
+    if (version !== 2) {
       throw new Error(`不支持的数据库版本：${version}`);
     }
     NativeScheduler.validateAbi();
@@ -133,10 +159,11 @@ export class AppRepository {
       LEFT JOIN media ON media.id = pm.media_id
       WHERE s.suspended_at IS NULL AND s.deleted_at IS NULL
         AND ((s.scheduler_state <> 0 AND s.due_at <= ?)
-          OR (s.scheduler_state = 0 AND (
-            SELECT COUNT(*) FROM review_log
-            WHERE state_before = 0 AND reviewed_at >= ?
-          ) < 20))
+          OR (s.scheduler_state = 0 AND (s.kind = 'math_problem' OR (
+            SELECT COUNT(*) FROM review_event_v2 e
+            JOIN memory_review_event_v2 m ON m.review_event_id = e.id
+            WHERE m.state_before = 0 AND e.reviewed_at >= ?
+          ) < (SELECT daily_new_memory_limit FROM learning_preferences WHERE singleton = 1))))
       ORDER BY
         CASE WHEN s.scheduler_state <> 0 AND s.due_at < ? THEN 0
              WHEN s.scheduler_state <> 0 THEN 1 ELSE 2 END,
@@ -173,7 +200,7 @@ export class AppRepository {
     return row;
   }
 
-  async search(query: string): Promise<StudyRow[]> {
+  async search(query: string, deletedOnly: boolean = false): Promise<StudyRow[]> {
     const pattern = `%${query.trim().replace(/\\/g, '\\\\').replace(/%/g, '\\%').replace(/_/g, '\\_')}%`;
     const result = await this.requiredStore().querySql(`
       SELECT s.id, s.kind, s.subject, s.scheduler_state, s.difficulty,
@@ -191,7 +218,7 @@ export class AppRepository {
       LEFT JOIN math_problem_media pm
         ON pm.math_problem_id = s.id AND pm.role = 'prompt' AND pm.sort_order = 0
       LEFT JOIN media ON media.id = pm.media_id
-      WHERE s.deleted_at IS NULL AND (
+      WHERE ${deletedOnly ? 's.deleted_at IS NOT NULL' : 's.deleted_at IS NULL'} AND (
         ? = '%%' OR COALESCE(m.prompt_markdown, p.prompt_markdown, '') LIKE ? ESCAPE '\'
         OR COALESCE(m.answer_markdown, p.solution_markdown, '') LIKE ? ESCAPE '\'
         OR COALESCE(p.source_name, '') LIKE ? ESCAPE '\')
@@ -452,8 +479,53 @@ export class AppRepository {
       [Math.floor(Date.now() / 1000), id]);
   }
 
+  async learningPreferences(): Promise<LearningPreferences> {
+    const result = await this.requiredStore().querySql(`SELECT daily_new_memory_limit,
+      session_minutes, memory_preset, math_intensity FROM learning_preferences WHERE singleton = 1`);
+    if (!result.goToFirstRow()) { result.close(); throw new Error('学习设置不存在'); }
+    const value: LearningPreferences = {
+      dailyNewMemoryLimit: result.getLong(0), sessionMinutes: result.getLong(1),
+      memoryPreset: result.getString(2), mathIntensity: result.getString(3),
+    };
+    result.close();
+    return value;
+  }
+
+  async saveLearningPreferences(value: LearningPreferences): Promise<void> {
+    if (value.dailyNewMemoryLimit < 0 || value.dailyNewMemoryLimit > 500 ||
+      value.sessionMinutes < 1 || value.sessionMinutes > 240) throw new Error('学习设置超出范围');
+    await this.requiredStore().executeSql(`UPDATE learning_preferences SET
+      daily_new_memory_limit = ?, session_minutes = ?, memory_preset = ?,
+      math_intensity = ?, updated_at = ? WHERE singleton = 1`,
+    [value.dailyNewMemoryLimit, value.sessionMinutes, value.memoryPreset,
+      value.mathIntensity, Math.floor(Date.now() / 1000)]);
+  }
+
+  async softDelete(ids: string[]): Promise<number> {
+    const now = Math.floor(Date.now() / 1000);
+    const store = this.requiredStore();
+    store.beginTransaction();
+    try {
+      for (let index = 0; index < ids.length; index++) {
+        await store.executeSql('UPDATE study_item SET deleted_at = ?, updated_at = ? WHERE id = ?',
+          [now, now, ids[index]]);
+      }
+      store.commit();
+      return now + 10;
+    } catch (error) { store.rollBack(); throw error; }
+  }
+
+  async restore(ids: string[]): Promise<void> {
+    for (let index = 0; index < ids.length; index++) {
+      await this.requiredStore().executeSql(
+        'UPDATE study_item SET deleted_at = NULL, updated_at = ? WHERE id = ?',
+        [Math.floor(Date.now() / 1000), ids[index]]);
+    }
+  }
+
   async review(row: StudyRow, rating: number, reviewedAt: number,
-    durationSeconds: number, mathResult?: string): Promise<ScheduleResult> {
+    durationSeconds: number, mathResult?: string, errorReason?: string,
+    hintRevealed: boolean = false): Promise<ScheduleResult> {
     const card: ScheduleCard = {
       state: row.state,
       difficulty: row.difficulty,
@@ -463,7 +535,47 @@ export class AppRepository {
       repetitions: row.repetitions,
       lapses: row.lapses,
     };
-    const scheduled = NativeScheduler.review(card, rating, reviewedAt);
+    const preferenceResult = await this.requiredStore().querySql(
+      'SELECT memory_preset, math_intensity FROM learning_preferences WHERE singleton = 1');
+    preferenceResult.goToFirstRow();
+    const memoryPreference = preferenceResult.getString(0);
+    const mathPreference = preferenceResult.getString(1);
+    preferenceResult.close();
+    const preset = memoryPreference === 'time_saving' ? 0 : memoryPreference === 'reinforced' ? 2 : 1;
+    const intensity = mathPreference === 'intensive' ? 0 : mathPreference === 'relaxed' ? 2 : 1;
+    let mathScheduled: MathScheduleResult | undefined = undefined;
+    let masteryBefore: number = 0;
+    let streakBefore: number = 0;
+    let scheduled: ScheduleResult;
+    if (row.kind === 'memory_card') {
+      scheduled = NativeScheduler.reviewMemoryV2(card, rating, reviewedAt, preset);
+    } else {
+      const mathState = await this.requiredStore().querySql(`
+        SELECT m.mastery_level, m.fluent_streak, s.repetitions
+        FROM math_schedule_state m JOIN schedule_state_v2 s USING (study_item_id)
+        WHERE m.study_item_id = ?`, [row.id]);
+      if (!mathState.goToFirstRow()) { mathState.close(); throw new Error('数学调度状态不存在'); }
+      masteryBefore = mathState.getLong(0);
+      streakBefore = mathState.getLong(1);
+      const repetitions = mathState.getLong(2);
+      mathState.close();
+      const feedback = mathResult === 'again' ? 0 : mathResult === 'wrong' ? 1 :
+        mathResult === 'effortful' ? 2 : mathResult === 'fluent' ? 3 : -1;
+      if (feedback < 0) throw new Error('数学评分缺失');
+      const reason = errorReason === 'concept' ? 1 : errorReason === 'approach' ? 2 :
+        errorReason === 'calculation' ? 3 : errorReason === 'misread' ? 4 :
+        errorReason === 'forgotten_fact' ? 5 : errorReason === 'timeout' ? 6 :
+        errorReason === undefined ? 0 : 7;
+      mathScheduled = NativeScheduler.reviewMathV2(masteryBefore, streakBefore, row.dueAt,
+        row.lastReviewedAt, repetitions, feedback, reason, hintRevealed, reviewedAt, intensity);
+      scheduled = {
+        state: 2, difficulty: mathScheduled.masteryLevel + 1,
+        stabilityDays: mathScheduled.scheduledDays, dueAt: mathScheduled.dueAt,
+        repetitions: mathScheduled.repetitions,
+        lapses: row.lapses + (feedback <= 1 ? 1 : 0),
+        scheduledDays: mathScheduled.scheduledDays, retrievabilityBefore: 0,
+      };
+    }
     const elapsed = row.lastReviewedAt === 0 ? 0 : (reviewedAt - row.lastReviewedAt) / 86400;
     const now = Math.floor(Date.now() / 1000);
     const store = this.requiredStore();
@@ -476,26 +588,50 @@ export class AppRepository {
       `, [scheduled.state, scheduled.difficulty, scheduled.stabilityDays,
         scheduled.dueAt, reviewedAt, scheduled.repetitions, scheduled.lapses,
         now, row.id, row.repetitions]);
-      await store.executeSql(`
-        INSERT INTO review_log (
-          id, study_item_id, reviewed_at, rating, duration_seconds,
-          scheduler_abi_version, state_before, state_after, elapsed_days,
-          scheduled_days, retrievability_before, difficulty_before,
-          difficulty_after, stability_before, stability_after, due_at_after,
-          device_id, created_at
-        ) VALUES (?, ?, ?, ?, ?, 1, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'harmony-local', ?)
-      `, [AppRepository.newId(), row.id, reviewedAt, rating,
-        Math.max(0, durationSeconds), row.state, scheduled.state, elapsed,
-        scheduled.scheduledDays, scheduled.retrievabilityBefore, row.difficulty,
-        scheduled.difficulty, row.stabilityDays, scheduled.stabilityDays,
-        scheduled.dueAt, now]);
+      await store.executeSql(`UPDATE schedule_state_v2 SET due_at = ?, last_reviewed_at = ?,
+        repetitions = ?, needs_history_replay = 0, updated_at = ? WHERE study_item_id = ?`,
+      [scheduled.dueAt, reviewedAt, scheduled.repetitions, now, row.id]);
+      const eventId = AppRepository.newId();
+      await store.executeSql(`INSERT INTO review_event_v2 (id, study_item_id, algorithm,
+        algorithm_version, parameter_version, preference, feedback, reviewed_at,
+        duration_seconds, due_at_before, due_at_after, device_id, created_at)
+        VALUES (?, ?, ?, 2, 1, ?, ?, ?, ?, ?, ?, 'harmony-local', ?)`,
+      [eventId, row.id, row.kind === 'memory_card' ? 'memory_fsrs_6' : 'math_mastery_ladder',
+        row.kind === 'memory_card' ? memoryPreference : mathPreference,
+        row.kind === 'memory_card' ? rating : mathScheduled!.appliedFeedback,
+        reviewedAt, Math.max(0, durationSeconds), row.dueAt, scheduled.dueAt, now]);
+      if (row.kind === 'memory_card') {
+        await store.executeSql(`UPDATE memory_schedule_state SET state = ?, difficulty = ?,
+          stability_days = ?, lapses = ? WHERE study_item_id = ?`,
+        [scheduled.state, scheduled.difficulty, scheduled.stabilityDays, scheduled.lapses, row.id]);
+        await store.executeSql(`INSERT INTO memory_review_event_v2 (review_event_id,
+          state_before, state_after, target_retention, elapsed_days, scheduled_days,
+          retrievability_before, difficulty_before, difficulty_after,
+          stability_before, stability_after) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        [eventId, row.state, scheduled.state, preset === 0 ? 0.85 : preset === 2 ? 0.93 : 0.90,
+          elapsed, scheduled.scheduledDays, scheduled.retrievabilityBefore, row.difficulty,
+          scheduled.difficulty, row.stabilityDays, scheduled.stabilityDays]);
+      }
       if (row.kind === 'math_problem' && mathResult !== undefined) {
+        const attemptId = AppRepository.newId();
         await store.executeSql(`
           INSERT INTO attempt (
-            id, math_problem_id, started_at, finished_at, result, created_at
-          ) VALUES (?, ?, ?, ?, ?, ?)
-        `, [AppRepository.newId(), row.id,
-          reviewedAt - Math.max(0, durationSeconds), reviewedAt, mathResult, now]);
+            id, math_problem_id, started_at, finished_at, result, error_reason, created_at
+          ) VALUES (?, ?, ?, ?, ?, ?, ?)
+        `, [attemptId, row.id, reviewedAt - Math.max(0, durationSeconds), reviewedAt,
+          mathResult, errorReason ?? null, now]);
+        await store.executeSql(`UPDATE math_schedule_state SET mastery_level = ?,
+          fluent_streak = ? WHERE study_item_id = ?`,
+        [mathScheduled!.masteryLevel, mathScheduled!.fluentStreak, row.id]);
+        const requested = mathResult === 'again' ? 0 : mathResult === 'wrong' ? 1 :
+          mathResult === 'effortful' ? 2 : 3;
+        await store.executeSql(`INSERT INTO math_review_event_v2 (review_event_id,
+          attempt_id, requested_feedback, applied_feedback, error_reason, hint_revealed,
+          mastery_before, mastery_after, fluent_streak_before, fluent_streak_after,
+          scheduled_days) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        [eventId, attemptId, requested, mathScheduled!.appliedFeedback, errorReason ?? null,
+          hintRevealed ? 1 : 0, masteryBefore, mathScheduled!.masteryLevel, streakBefore,
+          mathScheduled!.fluentStreak, mathScheduled!.scheduledDays]);
       }
       store.commit();
       return scheduled;
@@ -530,9 +666,10 @@ export class AppRepository {
       }
       const manifest: BackupManifest = {
         format: 'reviewfault-backup',
-        version: 1,
-        schemaVersion: 1,
-        schedulerAbiVersion: 1,
+        version: 2,
+        appVersion: '0.2.0',
+        schemaVersion: 2,
+        schedulerAbiVersion: 2,
         exportedAt: Math.floor(Date.now() / 1000),
         files: manifestEntries,
       };
@@ -581,8 +718,11 @@ export class AppRepository {
       }
       await zlib.decompressFile(archive, extracted);
       const manifest = JSON.parse(AppRepository.readText(`${extracted}/manifest.json`)) as BackupManifest;
-      if (manifest.format !== 'reviewfault-backup' || manifest.version !== 1 ||
-        manifest.schemaVersion !== 1 || manifest.schedulerAbiVersion !== 1) {
+      const compatibleV1 = manifest.version === 1 && manifest.schemaVersion === 1 &&
+        manifest.schedulerAbiVersion === 1;
+      const compatibleV2 = manifest.version === 2 && manifest.schemaVersion === 2 &&
+        manifest.schedulerAbiVersion === 2;
+      if (manifest.format !== 'reviewfault-backup' || (!compatibleV1 && !compatibleV2)) {
         throw new Error('不是受支持的 ReviewFault 备份');
       }
       for (let index = 0; index < manifest.files.length; index++) {
@@ -604,14 +744,30 @@ export class AppRepository {
       await this.requiredStore().backup(rollbackDatabase);
       try {
         await this.requiredStore().restore(restoredDatabase);
+        const restoredVersionResult = await this.requiredStore().querySql('PRAGMA user_version');
+        let restoredVersion = restoredVersionResult.goToFirstRow() ?
+          restoredVersionResult.getLong(0) : 0;
+        restoredVersionResult.close();
+        if (restoredVersion === 1) {
+          const statements = AppRepository.migrationStatements(reviewfault.schemaV2());
+          this.requiredStore().beginTransaction();
+          try {
+            for (let index = 0; index < statements.length; index++) {
+              await this.requiredStore().executeSql(statements[index]);
+            }
+            await this.requiredStore().executeSql('PRAGMA user_version = 2');
+            this.requiredStore().commit();
+            restoredVersion = 2;
+          } catch (error) {
+            this.requiredStore().rollBack();
+            throw error;
+          }
+        }
         const integrity = await this.requiredStore().querySql('PRAGMA integrity_check');
         const integrityOk = integrity.goToFirstRow() && integrity.getString(0) === 'ok';
         integrity.close();
         if (!integrityOk) throw new Error('备份数据库完整性检查失败');
-        const version = await this.requiredStore().querySql('PRAGMA user_version');
-        const versionOk = version.goToFirstRow() && version.getLong(0) === 1;
-        version.close();
-        if (!versionOk) throw new Error('备份数据库版本不兼容');
+        if (restoredVersion !== 2) throw new Error('备份数据库版本不兼容');
         const foreignKeys = await this.requiredStore().querySql('PRAGMA foreign_key_check');
         const hasBrokenReference = foreignKeys.goToFirstRow();
         foreignKeys.close();

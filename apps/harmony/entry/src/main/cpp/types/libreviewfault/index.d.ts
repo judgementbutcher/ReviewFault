@@ -11,6 +11,7 @@ export interface ScheduleResult {
 
 export const abiVersion: () => number;
 export const schemaV1: () => string;
+export const schemaV2: () => string;
 export const review: (
   state: number,
   difficulty: number,
@@ -23,3 +24,18 @@ export const review: (
   reviewedAt: number,
   targetRetention: number,
 ) => ScheduleResult;
+export const reviewMemoryV2: typeof review;
+export interface MathScheduleResult {
+  masteryLevel: number;
+  fluentStreak: number;
+  dueAt: number;
+  repetitions: number;
+  scheduledDays: number;
+  appliedFeedback: number;
+}
+export const reviewMathV2: (
+  masteryLevel: number, fluentStreak: number, dueAt: number,
+  lastReviewedAt: number, repetitions: number, feedback: number,
+  errorReason: number, hintRevealed: boolean, reviewedAt: number,
+  intensity: number,
+) => MathScheduleResult;

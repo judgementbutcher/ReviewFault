@@ -138,6 +138,56 @@ void test_queue_validation() {
   }
 }
 
+void test_v2_preferences_and_interleaving() {
+  LearningPreferences preferences;
+  expect(validate(preferences).empty(), "default v2 learning preferences are valid");
+  preferences.session_minutes = 0;
+  expect(has_error(validate(preferences), "duration_out_of_range"),
+         "zero minute session is rejected");
+  LibraryFilter filter;
+  expect(validate(filter).empty(), "default library pagination is valid");
+  filter.limit = 0;
+  expect(has_error(validate(filter), "page_size_out_of_range"),
+         "zero page size is rejected");
+
+  constexpr std::int64_t now = 1'800'050'000;
+  const std::vector<QueueCandidate> candidates = {
+      {"a", StudyKind::MathProblem, CardState::Review, now - 4, 300, false, "calculus"},
+      {"b", StudyKind::MathProblem, CardState::Review, now - 3, 300, false, "calculus"},
+      {"c", StudyKind::MathProblem, CardState::Review, now - 2, 300, false, "calculus"},
+      {"d", StudyKind::MathProblem, CardState::Review, now - 1, 300, false, "linear"},
+  };
+  const auto plan = plan_queue(candidates, {now, now - 100, 0, 0});
+  expect(plan.items.size() == 4 && plan.items[2].item.id == "d",
+         "a substitute chapter prevents three consecutive math problems");
+
+  DeletionState deletion{{"a"}, now, now + 10};
+  expect(deletion.can_undo(now + 5) && !deletion.can_undo(now + 11),
+         "soft deletion undo window is explicit");
+}
+
+void test_large_library_queue() {
+  constexpr std::int64_t now = 1'800'050'000;
+  std::vector<QueueCandidate> candidates;
+  candidates.reserve(5'000);
+  for (int index = 0; index < 5'000; ++index) {
+    candidates.emplace_back(
+        "item-" + std::to_string(index), StudyKind::MathProblem,
+        CardState::Review, now - index, 300, false,
+        "chapter-" + std::to_string(index % 12));
+  }
+  const auto plan = plan_queue(candidates, {now, now - 10'000, 0, 0});
+  expect(plan.items.size() == 5'000,
+         "a 5,000 item due queue loads without truncation");
+  for (std::size_t index = 2; index < plan.items.size(); ++index) {
+    const auto& a = plan.items[index - 2].item.chapter_id;
+    const auto& b = plan.items[index - 1].item.chapter_id;
+    const auto& c = plan.items[index].item.chapter_id;
+    expect(a != b || b != c,
+           "large queue avoids three consecutive same-chapter math items");
+  }
+}
+
 }  // namespace
 
 int main() {
@@ -146,6 +196,8 @@ int main() {
   test_queue_order_and_sections();
   test_queue_time_budget();
   test_queue_validation();
+  test_v2_preferences_and_interleaving();
+  test_large_library_queue();
   if (failures != 0) {
     std::cerr << failures << " domain test(s) failed\n";
     return EXIT_FAILURE;
@@ -153,4 +205,3 @@ int main() {
   std::cout << "All domain tests passed\n";
   return EXIT_SUCCESS;
 }
-
