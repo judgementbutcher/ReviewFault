@@ -36,6 +36,14 @@ JKS/PKCS12 文件的 base64 内容，最后一个值是证书 SHA-256 指纹（�
 
 用 DevEco Studio 打开 `apps/harmony`，选择 HarmonyOS SDK API 13 或更高版本，并为 `default` product 配置签名。运行 entry 模块。CMake 在构建期把根目录的 schema 注入 NAPI 模块；不要手工复制 SQL。
 
+正式发布由带有 `self-hosted`、`linux`、`harmonyos` 标签的组织 runner 构建；该 runner 需要安装
+HarmonyOS SDK API 13 或更高版本，并把 `ohpm`、`hvigorw` 加入 `PATH`。release workflow
+需要仓库 secrets：`HARMONY_KEYSTORE_BASE64`、`HARMONY_KEYSTORE_PASSWORD`、
+`HARMONY_KEY_ALIAS`、`HARMONY_KEY_PASSWORD`、`HARMONY_CERTIFICATE_BASE64` 和
+`HARMONY_PROFILE_BASE64`。三个 `BASE64` 值分别是发布 `.p12`、`.cer` 和 `.p7b` 文件的
+base64 内容；签名材料只会写入 runner 临时目录。tag 发布和手动触发都会生成
+`ReviewFault-harmony-v0.2.2.hap`，手动触发可用于给既有 `v0.2.2` Release 补充 HAP。
+
 真机验收需覆盖 PhotoViewPicker、DocumentViewPicker、`RdbStore.backup/restore` 和跨端 `.reviewfault` 恢复。API 13 是最低版本，因为系统 zlib 从该版本起明确拒绝压缩包路径穿越。
 
 ## Windows

@@ -18,6 +18,6 @@
 
 - Android：安装 `ReviewFault-android-v0.2.2.apk`，最低 API 26；从旧 debug 包切换到正式签名时，如系统提示签名不一致，请先在旧版导出 `.reviewfault`，再安装新版并恢复；
 - Windows：解压 `ReviewFault-windows-v0.2.2-x64.zip` 后运行，支持 Windows 10 1809 或更高；
-- HarmonyOS：版本元数据已同步，签名 HAP 仍由组织的 DevEco/HarmonyOS runner 生成。
+- HarmonyOS：安装 `ReviewFault-harmony-v0.2.2.hap`，需要 HarmonyOS 5.0.1（API 13）或更高版本；
 
 首次开始长期使用前，建议先做一次空库备份/恢复演练；之后在大量录入或跨版本升级前导出一份 `.reviewfault`。

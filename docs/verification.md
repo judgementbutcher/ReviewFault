@@ -11,5 +11,5 @@
 本轮已在宿主环境运行 `make test`、Windows 仓储集成测试、Linux 上的 WinUI 托管编译，
 以及 Android debug/release 的双 ABI 构建与 lint；release APK 还使用临时测试证书完成了
 签名结构校验。正式 Android 资产必须由仓库持久证书重新签名，Windows 原生包必须由
-Windows runner 生成，HAP 必须由组织的签名 HarmonyOS runner 生成。API 26/35 真机、
+Windows runner 生成，HAP 由组织的签名 HarmonyOS runner 构建并随 GitHub Release 发布。API 26/35 真机、
 Windows 10/11 以及三端互恢复仍属于发布后的设备验收。

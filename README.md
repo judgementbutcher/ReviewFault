@@ -17,7 +17,7 @@ make test
 
 这会构建调度内核和真实共享库，运行算法、领域、动态 ABI、SQLite、备份协议及平台源码契约测试。需要支持 C++20 的编译器和带 `node:sqlite` 的 Node.js 22+；也可单独运行 `make core-test`。三端安装包需在各自 SDK 环境中构建，见[构建说明](docs/building.md)。
 
-Android 调试 APK 在完成 Android 构建后位于 `apps/android/app/build/outputs/apk/debug/app-debug.apk`；正式版本由 tag workflow 使用持久证书生成可覆盖升级的 release APK。仓库自带带 SHA-256 固定的 Gradle wrapper。
+Android 调试 APK 在完成 Android 构建后位于 `apps/android/app/build/outputs/apk/debug/app-debug.apk`；正式版本由 tag workflow 使用持久证书生成可覆盖升级的 release APK，并由组织的签名 HarmonyOS runner 同步生成 HAP，和 Windows 压缩包一起发布到 GitHub Releases。仓库自带带 SHA-256 固定的 Gradle wrapper。
 
 ## 文档
 

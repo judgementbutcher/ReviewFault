@@ -36,6 +36,16 @@ assert(release.includes('ANDROID_KEYSTORE_BASE64'),
 assert(release.includes('ANDROID_CERT_SHA256') && release.includes('apksigner') &&
   release.includes('--print-certs'),
   'release workflow must pin and verify the Android signing certificate');
+assert(release.includes('ReviewFault-harmony-v${{ env.APP_VERSION }}.hap') &&
+  release.includes('needs: [core, android, harmony, windows]'),
+  'release workflow must publish a HarmonyOS HAP and gate publishing on its build');
+assert(release.includes('HARMONY_KEYSTORE_BASE64') &&
+  release.includes('configure-harmony-signing.mjs') &&
+  release.includes("-name '*-signed.hap'"),
+  'release workflow must build a persistently signed HarmonyOS HAP');
+assert(release.includes('workflow_dispatch:') &&
+  release.includes('tag_name: v${{ env.APP_VERSION }}'),
+  'release workflow must support adding the HAP to the existing version release');
 assert(release.includes('test "$GITHUB_REF_NAME" = "v$APP_VERSION"'),
   'release tag must match application metadata');
 
