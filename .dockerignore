@@ -1,0 +1,9 @@
+.git
+.github
+.release-secrets
+build
+**/bin
+**/obj
+apps/android/.gradle
+apps/android/app/build
+apps/android/app/.cxx
