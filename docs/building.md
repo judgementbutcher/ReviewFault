@@ -60,7 +60,7 @@ dotnet msbuild apps/windows/ReviewFault/ReviewFault.csproj -t:Compile \
 正式 Windows 产物必须使用自包含发布配置，不能直接压缩普通 `build` 输出：
 
 ```powershell
-dotnet publish apps/windows/ReviewFault/ReviewFault.csproj `
+msbuild apps/windows/ReviewFault/ReviewFault.csproj -restore -t:Publish `
   -p:PublishProfile=win-x64 -p:Platform=x64 `
   -p:SelfContained=true -p:WindowsAppSDKSelfContained=true
 

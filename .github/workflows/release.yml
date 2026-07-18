@@ -94,7 +94,7 @@ jobs:
         shell: pwsh
         run: |
           $publishDir = Join-Path $env:GITHUB_WORKSPACE "artifacts\windows\publish"
-          dotnet publish apps/windows/ReviewFault/ReviewFault.csproj `
+          msbuild apps/windows/ReviewFault/ReviewFault.csproj -restore -t:Publish `
             -p:PublishProfile=win-x64 -p:Configuration=Release -p:Platform=x64 `
             -p:SelfContained=true -p:WindowsAppSDKSelfContained=true `
             -p:PublishDir="$publishDir" 2>&1 | Tee-Object -FilePath windows-publish.log
