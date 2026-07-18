@@ -55,6 +55,9 @@ int main() {
                                            const rf_memory_review_input_v3*,
                                            rf_memory_review_result_v3*, char*, size_t)>(
       library, "review_memory_v3");
+  const auto canonical_v4 = load<int32_t (*)(const rf_review_action_v4*, size_t,
+                                               size_t*, size_t, char*, size_t)>(
+      library, "canonical_review_order_v4");
 
   if (abi_version() != RF_SCHEDULER_ABI_VERSION ||
       config_size() != sizeof(rf_scheduler_config) || card_size() != sizeof(rf_card) ||
@@ -120,6 +123,19 @@ int main() {
                 sizeof(error)) != 0 ||
       memory_result_v3.event.algorithm_version != 3) {
     std::cerr << "dynamic memory v3 ABI review failed: " << error << '\n';
+    dlclose(library);
+    return EXIT_FAILURE;
+  }
+  const rf_review_action_v4 actions[] = {
+      {sizeof(rf_review_action_v4), "later", "device", 2, 0,
+       RF_RATING_GOOD, 1'800'000'100, 0, RF_MATH_ERROR_NONE, 0},
+      {sizeof(rf_review_action_v4), "first", "device", 1, 0,
+       RF_RATING_AGAIN, 1'800'000'200, 0, RF_MATH_ERROR_NONE, 0},
+  };
+  size_t order[2]{};
+  if (canonical_v4(actions, 2, order, 2, error, sizeof(error)) != 0 ||
+      order[0] != 1 || order[1] != 0) {
+    std::cerr << "dynamic v4 canonical replay failed: " << error << '\n';
     dlclose(library);
     return EXIT_FAILURE;
   }

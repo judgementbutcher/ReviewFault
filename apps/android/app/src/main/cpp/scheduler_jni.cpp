@@ -3,6 +3,8 @@
 #include "reviewfault/reviewfault_c.h"
 
 #include <cstdint>
+#include <string>
+#include <vector>
 
 namespace {
 
@@ -18,6 +20,65 @@ void throw_illegal_argument(JNIEnv* env, const char* message) {
 extern "C" JNIEXPORT jint JNICALL
 Java_cn_reviewfault_app_core_NativeScheduler_nativeAbiVersion(JNIEnv*, jobject) {
   return static_cast<jint>(rf_scheduler_abi_version());
+}
+
+extern "C" JNIEXPORT jintArray JNICALL
+Java_cn_reviewfault_app_core_NativeScheduler_nativeCanonicalOrderV4(
+    JNIEnv* env, jobject, jobjectArray action_ids, jobjectArray device_ids,
+    jlongArray device_counters, jlongArray causal_cursors, jintArray feedback,
+    jlongArray reviewed_at) {
+  const auto count = env->GetArrayLength(action_ids);
+  if (env->GetArrayLength(device_ids) != count ||
+      env->GetArrayLength(device_counters) != count ||
+      env->GetArrayLength(causal_cursors) != count ||
+      env->GetArrayLength(feedback) != count ||
+      env->GetArrayLength(reviewed_at) != count) {
+    throw_illegal_argument(env, "ABI v4 action arrays must have equal lengths");
+    return nullptr;
+  }
+  std::vector<std::string> action_storage;
+  std::vector<std::string> device_storage;
+  std::vector<rf_review_action_v4> actions(static_cast<std::size_t>(count));
+  action_storage.reserve(count);
+  device_storage.reserve(count);
+  jlong* counters = env->GetLongArrayElements(device_counters, nullptr);
+  jlong* cursors = env->GetLongArrayElements(causal_cursors, nullptr);
+  jint* ratings = env->GetIntArrayElements(feedback, nullptr);
+  jlong* times = env->GetLongArrayElements(reviewed_at, nullptr);
+  for (jsize index = 0; index < count; ++index) {
+    auto action = static_cast<jstring>(env->GetObjectArrayElement(action_ids, index));
+    auto device = static_cast<jstring>(env->GetObjectArrayElement(device_ids, index));
+    const char* action_text = env->GetStringUTFChars(action, nullptr);
+    const char* device_text = env->GetStringUTFChars(device, nullptr);
+    action_storage.emplace_back(action_text);
+    device_storage.emplace_back(device_text);
+    env->ReleaseStringUTFChars(action, action_text);
+    env->ReleaseStringUTFChars(device, device_text);
+    env->DeleteLocalRef(action);
+    env->DeleteLocalRef(device);
+  }
+  for (jsize index = 0; index < count; ++index) {
+    actions[index] = {sizeof(rf_review_action_v4), action_storage[index].c_str(),
+                      device_storage[index].c_str(),
+                      static_cast<uint64_t>(counters[index]),
+                      static_cast<uint64_t>(cursors[index]), ratings[index],
+                      static_cast<int64_t>(times[index]), 0, RF_MATH_ERROR_NONE, 0};
+  }
+  env->ReleaseLongArrayElements(device_counters, counters, JNI_ABORT);
+  env->ReleaseLongArrayElements(causal_cursors, cursors, JNI_ABORT);
+  env->ReleaseIntArrayElements(feedback, ratings, JNI_ABORT);
+  env->ReleaseLongArrayElements(reviewed_at, times, JNI_ABORT);
+  std::vector<size_t> order(static_cast<std::size_t>(count));
+  char error[256]{};
+  if (canonical_review_order_v4(actions.data(), actions.size(), order.data(),
+                                order.size(), error, sizeof(error)) != 0) {
+    throw_illegal_argument(env, error);
+    return nullptr;
+  }
+  std::vector<jint> converted(order.begin(), order.end());
+  jintArray result = env->NewIntArray(count);
+  env->SetIntArrayRegion(result, 0, count, converted.data());
+  return result;
 }
 
 extern "C" JNIEXPORT jobject JNICALL

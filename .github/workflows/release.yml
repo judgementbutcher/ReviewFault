@@ -1,7 +1,7 @@
 name: release
 
 env:
-  APP_VERSION: 0.3.2
+  APP_VERSION: 0.4.0
 
 on:
   push:
@@ -24,7 +24,9 @@ jobs:
           node-version: 22
       - uses: actions/setup-dotnet@v4
         with:
-          dotnet-version: 8.0.x
+          dotnet-version: |
+            8.0.x
+            10.0.x
       - name: Verify release tag
         run: test "$GITHUB_REF_NAME" = "v$APP_VERSION"
       - run: make test
@@ -82,13 +84,83 @@ jobs:
           name: android-release
           path: ReviewFault-android-v${{ env.APP_VERSION }}.apk
 
+  backend:
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - uses: actions/checkout@v4
+      - name: Verify release tag
+        run: test "$GITHUB_REF_NAME" = "v$APP_VERSION"
+      - uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - name: Build and publish immutable sync image
+        id: image
+        shell: bash
+        run: |
+          IMAGE="ghcr.io/${GITHUB_REPOSITORY,,}/sync:${APP_VERSION}"
+          docker build -f services/sync/Dockerfile -t "$IMAGE" .
+          docker push "$IMAGE"
+          docker inspect --format='{{index .RepoDigests 0}}' "$IMAGE" | tee sync-image-digest.txt
+      - uses: actions/upload-artifact@v4
+        with:
+          name: backend-release
+          path: sync-image-digest.txt
+
+  harmony:
+    runs-on: [self-hosted, harmonyos-6, api-20]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - name: Verify release tag and signing tools
+        shell: bash
+        run: |
+          test "$GITHUB_REF_NAME" = "v$APP_VERSION"
+          test -x "${HVIGORW:?HVIGORW is required on the Harmony runner}"
+          test -x "${HAP_VERIFY_TOOL:?HAP_VERIFY_TOOL is required on the Harmony runner}"
+          command -v jq
+          command -v ohpm
+          command -v strings
+      - name: Build signed Harmony HAP
+        working-directory: apps/harmony
+        shell: bash
+        env:
+          HARMONY_SIGNING_CONFIG_BASE64: ${{ secrets.HARMONY_SIGNING_CONFIG_BASE64 }}
+        run: |
+          test -n "$HARMONY_SIGNING_CONFIG_BASE64"
+          printf '%s' "$HARMONY_SIGNING_CONFIG_BASE64" | base64 --decode > "$RUNNER_TEMP/harmony-signing.json"
+          jq -e 'type == "array" and any(.[]; .name == "release")' "$RUNNER_TEMP/harmony-signing.json" >/dev/null
+          jq --slurpfile signing "$RUNNER_TEMP/harmony-signing.json" \
+            '.app.signingConfigs = $signing[0]' build-profile.json5 > "$RUNNER_TEMP/build-profile.json5"
+          mv "$RUNNER_TEMP/build-profile.json5" build-profile.json5
+          node ../../tools/prepare-harmony-contracts.mjs
+          ohpm install --all
+          "$HVIGORW" assembleHap --mode module -p product=default -p buildMode=release
+          HAP="$(find entry/build -type f -name '*.hap' -print -quit)"
+          test -n "$HAP"
+          "$HAP_VERIFY_TOOL" "$HAP"
+          strings "$HAP" | grep -F 'cn.reviewfault.app'
+          cp "$HAP" "$GITHUB_WORKSPACE/ReviewFault-harmony-v${APP_VERSION}-signed.hap"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: harmony-release
+          path: ReviewFault-harmony-v${{ env.APP_VERSION }}-signed.hap
+
   windows:
     runs-on: windows-2022
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-dotnet@v4
         with:
-          dotnet-version: 8.0.x
+          dotnet-version: |
+            8.0.x
+            10.0.x
       - uses: microsoft/setup-msbuild@v2
       - name: Publish self-contained Windows application
         shell: pwsh
@@ -167,7 +239,7 @@ jobs:
             ReviewFault-windows-v${{ env.APP_VERSION }}-x64.zip
 
   publish:
-    needs: [core, android, windows]
+    needs: [core, backend, android, harmony, windows]
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v4
@@ -178,13 +250,17 @@ jobs:
       - run: >-
           sha256sum "ReviewFault-android-v${APP_VERSION}.apk"
           "ReviewFault-windows-v${APP_VERSION}-x64.msi"
-          "ReviewFault-windows-v${APP_VERSION}-x64.zip" > SHA256SUMS
+          "ReviewFault-windows-v${APP_VERSION}-x64.zip"
+          "ReviewFault-harmony-v${APP_VERSION}-signed.hap"
+          sync-image-digest.txt > SHA256SUMS
       - uses: softprops/action-gh-release@v2
         with:
           name: ReviewFault v${{ env.APP_VERSION }}
-          body_path: docs/release-v0.3.2.md
+          body_path: docs/release-v0.4.0.md
           files: |
             ReviewFault-android-v${{ env.APP_VERSION }}.apk
+            ReviewFault-harmony-v${{ env.APP_VERSION }}-signed.hap
             ReviewFault-windows-v${{ env.APP_VERSION }}-x64.msi
             ReviewFault-windows-v${{ env.APP_VERSION }}-x64.zip
+            sync-image-digest.txt
             SHA256SUMS

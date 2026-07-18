@@ -1,6 +1,9 @@
 using ReviewFault.Core;
 using ReviewFault.Data;
+using ReviewFault.Services;
+using System.Security.Cryptography;
 using System.IO.Compression;
+using System.Text.Json;
 
 var root = Path.Combine(Path.GetTempPath(), "ReviewFaultHeadless-" + Guid.NewGuid());
 Directory.CreateDirectory(root);
@@ -8,6 +11,15 @@ try
 {
     var repository = new AppRepository(root);
     await repository.InitializeAsync();
+    using var validSyncClient = new SyncClient("https://sync.reviewfault.app");
+    RequireThrows<ArgumentException>(() => new SyncClient("http://localhost.evil.example"),
+        "sync endpoint validation rejects localhost prefix spoofing");
+    var canonical = NativeScheduler.CanonicalOrderV4(new[] {
+        new ReplayAction("later", "device", 2, 0, 3, 1_800_000_000),
+        new ReplayAction("first", "device", 1, 0, 1, 1_800_000_100),
+    });
+    Require(canonical.SequenceEqual(new[] { 1, 0 }),
+        "Windows P/Invoke uses the core v4 canonical order");
 
     var cardId = await repository.CreateMemoryCardAsync(
         "qa", "operating_systems", "什么是工作集？", "进程在某段时间内实际访问的页面集合。",
@@ -69,6 +81,7 @@ try
     Require(result.Card.State == CardState.Review, "Good graduates the item to review");
     Require(result.Card.DueAt > reviewedAt, "review produces a future due time");
     var mathRow = (await repository.SearchAsync("集成测试")).Single(item => item.Id == mathId);
+    await repository.SaveInkDraftAsync(mathId, new byte[] { 31, 139, 8, 0, 0, 0, 0, 0 });
     var mathReview = await repository.ReviewAsync(mathRow, Rating.Good, reviewedAt + 1, 90,
         "effortful", null, false);
     Require(mathReview.AlgorithmVersion == 3 && mathReview.ScheduledDays > 0,
@@ -78,7 +91,7 @@ try
     await repository.SaveLearningPreferencesAsync(preferences with {
         DailyNewMemoryLimit = 12, MathIntensity = "intensive" });
     Require((await repository.GetLearningPreferencesAsync()).DailyNewMemoryLimit == 12,
-        "learning settings persist in schema v3");
+        "learning settings persist through schema v4");
     await repository.SaveLearningPreferencesAsync((await repository.GetLearningPreferencesAsync()) with {
         SchedulerGeneration = 2 });
     var v2Row = (await repository.SearchAsync("TCP")).Single(item => item.Id == enumerationId);
@@ -92,6 +105,98 @@ try
     Require(!(await repository.TrashAsync()).Any(item => item.Id == enumerationId),
         "trash item can be restored with its schedule");
 
+    var accountId = Guid.NewGuid().ToString(); var workspaceId = Guid.NewGuid().ToString();
+    await repository.BindAccountAsync(accountId, workspaceId);
+    var pendingBeforePull = (await repository.SyncIdentityAsync()).PendingCount;
+    var remoteId = Guid.NewGuid().ToString(); var remoteActionId = Guid.NewGuid().ToString();
+    var remoteTagId = Guid.NewGuid().ToString(); var remoteDeviceId = Guid.NewGuid().ToString();
+    var remoteArtifactId = Guid.NewGuid().ToString(); var remoteAttemptId = Guid.NewGuid().ToString();
+    var remoteRelationAddId = Guid.NewGuid().ToString();
+    var existingMediaSha = Convert.ToHexString(SHA256.HashData(await File.ReadAllBytesAsync(image)))
+        .ToLowerInvariant();
+    var remoteReviewedAt = reviewedAt + 10;
+    await repository.ApplyPulledOperationsAsync(workspaceId, new[] {
+        new PulledOperation(Guid.NewGuid().ToString(), 1, remoteDeviceId, 1,
+            "studyItem", remoteId, "create", JsonSerializer.SerializeToElement(new {
+                kind = "memory_card", subject = "computer_networks", templateType = "qa",
+                prompt = "远端创建的题目", answer = "远端答案", hints = Array.Empty<string>(),
+                answerPoints = Array.Empty<string>(), createdAt = remoteReviewedAt - 10,
+                updatedAt = remoteReviewedAt - 10,
+            }), remoteReviewedAt - 10),
+        new PulledOperation(Guid.NewGuid().ToString(), 2, remoteDeviceId, 2,
+            "memoryCard", remoteId, "update", JsonSerializer.SerializeToElement(new {
+                promptMarkdown = "远端更新的题目", answerMarkdown = "远端更新的答案",
+                hints = new[] { "分层提示" }, answerPoints = Array.Empty<string>(),
+                occlusions = Array.Empty<object>(),
+            }), remoteReviewedAt - 5),
+        new PulledOperation(Guid.NewGuid().ToString(), 3, remoteDeviceId, 3,
+            "reviewAction", remoteActionId, "create", JsonSerializer.SerializeToElement(new {
+                studyItemId = remoteId, algorithm = "memory_fsrs_6", feedback = 3,
+                reviewedAt = remoteReviewedAt, durationSeconds = 20,
+                errorReason = (string?)null, hintRevealed = false,
+            }), remoteReviewedAt),
+        new PulledOperation(Guid.NewGuid().ToString(), 4, remoteDeviceId, 4,
+            "tag", remoteTagId, "create", JsonSerializer.SerializeToElement(new {
+                name = "远端标签",
+            }), remoteReviewedAt),
+        new PulledOperation(remoteRelationAddId, 5, remoteDeviceId, 5,
+            "relation", $"{remoteId}:{remoteTagId}", "add", JsonSerializer.SerializeToElement(new {
+                relationType = "study_item_tag", sourceId = remoteId, targetId = remoteTagId,
+            }), remoteReviewedAt),
+        new PulledOperation(Guid.NewGuid().ToString(), 6, remoteDeviceId, 6,
+            "learningPreferences", "singleton", "update", JsonSerializer.SerializeToElement(new {
+                dailyNewMemoryLimit = 17, sessionMinutes = 25, memoryPreset = "reinforced",
+                mathIntensity = "balanced", schedulerGeneration = 3,
+            }), remoteReviewedAt),
+        new PulledOperation(Guid.NewGuid().ToString(), 7, remoteDeviceId, 7,
+            "attemptArtifact", remoteArtifactId, "create", JsonSerializer.SerializeToElement(new {
+                attemptId = remoteAttemptId, studyItemId = mathId,
+                startedAt = remoteReviewedAt - 30, finishedAt = remoteReviewedAt,
+                result = "effortful", errorReason = (string?)null,
+                artifactType = "annotated-image", mediaSha256 = existingMediaSha,
+                mediaMimeType = "image/jpeg", mediaByteCount = 512, pageCount = 1,
+            }), remoteReviewedAt),
+    }, 7);
+    var remoteRow = (await repository.SearchAsync("远端更新")).Single();
+    Require(remoteRow.State == CardState.Review && remoteRow.DueAt > remoteReviewedAt,
+        "pulled review facts deterministically rebuild the visible schedule");
+    var syncedIdentity = await repository.SyncIdentityAsync();
+    Require(syncedIdentity.Cursor == 7 && syncedIdentity.WorkspaceId == workspaceId,
+        "pull commits the workspace cursor with remote state");
+    Require(syncedIdentity.PendingCount == pendingBeforePull,
+        "pulled operations do not echo back into the local outbox");
+    Require(await RelationExistsAsync(root, remoteId, remoteTagId),
+        "pulled relation add materializes the tag link");
+    await repository.ApplyPulledOperationsAsync(workspaceId, new[] {
+        new PulledOperation(Guid.NewGuid().ToString(), 8, remoteDeviceId, 8,
+            "relation", $"{remoteId}:{remoteTagId}", "remove", JsonSerializer.SerializeToElement(new {
+                relationType = "study_item_tag", sourceId = remoteId, targetId = remoteTagId,
+                observedAdds = Array.Empty<string>(),
+            }), remoteReviewedAt + 1),
+    }, 8);
+    Require(await RelationExistsAsync(root, remoteId, remoteTagId),
+        "an observed-remove does not suppress a concurrent unobserved add");
+    await repository.ApplyPulledOperationsAsync(workspaceId, new[] {
+        new PulledOperation(Guid.NewGuid().ToString(), 9, remoteDeviceId, 9,
+            "relation", $"{remoteId}:{remoteTagId}", "remove", JsonSerializer.SerializeToElement(new {
+                relationType = "study_item_tag", sourceId = remoteId, targetId = remoteTagId,
+                observedAdds = new[] { remoteRelationAddId },
+            }), remoteReviewedAt + 2),
+    }, 9);
+    Require(!await RelationExistsAsync(root, remoteId, remoteTagId),
+        "a remove suppresses the add fact it explicitly observed");
+    await repository.ApplyPulledOperationsAsync(workspaceId, new[] {
+        new PulledOperation(Guid.NewGuid().ToString(), 10, remoteDeviceId, 10,
+            "relation", $"{remoteId}:{remoteTagId}", "add", JsonSerializer.SerializeToElement(new {
+                relationType = "study_item_tag", sourceId = remoteId, targetId = remoteTagId,
+            }), remoteReviewedAt + 3),
+    }, 10);
+    Require(await RelationExistsAsync(root, remoteId, remoteTagId),
+        "a later explicit add restores the relation after an observed remove");
+    syncedIdentity = await repository.SyncIdentityAsync();
+    Require(syncedIdentity.Cursor == 10 && syncedIdentity.PendingCount == pendingBeforePull,
+        "relation replay advances the cursor without producing an outbox echo");
+
     await using (var audit = new Microsoft.Data.Sqlite.SqliteConnection(
         $"Data Source={Path.Combine(root, "reviewfault.db")}"))
     {
@@ -104,8 +209,32 @@ try
         Require(Convert.ToInt32(await command.ExecuteScalarAsync()) == 1,
             "rollout rollback appends a v2 event without rewriting v3 history");
         command.CommandText = "PRAGMA user_version";
+        Require(Convert.ToInt32(await command.ExecuteScalarAsync()) == 4,
+            "repository initializes schema v4");
+        command.CommandText = "SELECT COUNT(*) FROM review_action_v4";
+        Require(Convert.ToInt32(await command.ExecuteScalarAsync()) == 4,
+            "local and pulled reviews append canonical v4 facts");
+        command.CommandText = """
+            SELECT COUNT(*) FROM review_action_v4 a
+            JOIN sync_outbox o ON o.entity_type = 'reviewAction' AND o.entity_id = a.action_id
+            """;
         Require(Convert.ToInt32(await command.ExecuteScalarAsync()) == 3,
-            "repository initializes schema v3");
+            "canonical review facts and outbox operations commit together");
+        command.CommandText = """
+            SELECT COUNT(*) FROM study_item_tag WHERE study_item_id = $item AND tag_id = $tag
+            """;
+        command.Parameters.AddWithValue("$item", remoteId);
+        command.Parameters.AddWithValue("$tag", remoteTagId);
+        Require(Convert.ToInt32(await command.ExecuteScalarAsync()) == 1,
+            "pulled tag and relation operations project into the local library");
+        command.Parameters.Clear();
+        command.CommandText = "SELECT daily_new_memory_limit FROM learning_preferences WHERE singleton = 1";
+        Require(Convert.ToInt32(await command.ExecuteScalarAsync()) == 17,
+            "pulled portable learning preferences are applied");
+        command.CommandText = "SELECT COUNT(*) FROM attempt_artifact WHERE id = $artifact";
+        command.Parameters.AddWithValue("$artifact", remoteArtifactId);
+        Require(Convert.ToInt32(await command.ExecuteScalarAsync()) == 1,
+            "pulled formal attempt artifacts retain their media and attempt relationship");
     }
 
     await using var backup = new MemoryStream();
@@ -178,6 +307,19 @@ static async Task RequireThrowsAsync<TException>(Func<Task> action, string messa
     }
 }
 
+static void RequireThrows<TException>(Action action, string message)
+    where TException : Exception
+{
+    try
+    {
+        action();
+        throw new InvalidOperationException("FAIL: " + message);
+    }
+    catch (TException)
+    {
+    }
+}
+
 static async Task<int> CountReviewArtifactsAsync(string root)
 {
     await using var connection = new Microsoft.Data.Sqlite.SqliteConnection(
@@ -188,4 +330,18 @@ static async Task<int> CountReviewArtifactsAsync(string root)
         "(SELECT COUNT(*) FROM review_event_v2) + " +
         "(SELECT COUNT(*) FROM review_event_v3) + (SELECT COUNT(*) FROM attempt)";
     return Convert.ToInt32(await command.ExecuteScalarAsync());
+}
+
+static async Task<bool> RelationExistsAsync(string root, string studyItemId, string tagId)
+{
+    await using var connection = new Microsoft.Data.Sqlite.SqliteConnection(
+        $"Data Source={Path.Combine(root, "reviewfault.db")}");
+    await connection.OpenAsync();
+    var command = connection.CreateCommand();
+    command.CommandText = """
+        SELECT EXISTS (SELECT 1 FROM study_item_tag WHERE study_item_id = $item AND tag_id = $tag)
+        """;
+    command.Parameters.AddWithValue("$item", studyItemId);
+    command.Parameters.AddWithValue("$tag", tagId);
+    return Convert.ToInt32(await command.ExecuteScalarAsync()) != 0;
 }

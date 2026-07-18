@@ -1,4 +1,5 @@
 #include "reviewfault/reviewfault_c.h"
+#include "reviewfault/scheduler_v4.hpp"
 
 #include "reviewfault/scheduler.hpp"
 #include "reviewfault/scheduler_v2.hpp"
@@ -8,8 +9,32 @@
 #include <cstring>
 #include <exception>
 #include <stdexcept>
+#include <vector>
 
 namespace {
+
+std::vector<reviewfault::ReviewActionV4> to_cpp_actions_v4(
+    const rf_review_action_v4* actions, size_t action_count) {
+  if (action_count > 0 && actions == nullptr) {
+    throw std::invalid_argument("actions are required");
+  }
+  std::vector<reviewfault::ReviewActionV4> converted;
+  converted.reserve(action_count);
+  for (size_t index = 0; index < action_count; ++index) {
+    const auto& action = actions[index];
+    if (action.struct_size != sizeof(action) || action.action_id == nullptr ||
+        action.device_id == nullptr) {
+      throw std::invalid_argument("ABI v4 review action is invalid");
+    }
+    converted.push_back({
+        action.action_id, action.device_id, action.device_counter,
+        action.causal_cursor, action.feedback, action.reviewed_at,
+        action.duration_seconds,
+        static_cast<reviewfault::MathErrorReason>(action.error_reason),
+        action.hint_revealed != 0});
+  }
+  return converted;
+}
 
 void write_error(const char* message, char* buffer, size_t size) {
   if (buffer == nullptr || size == 0) {
@@ -404,6 +429,69 @@ int32_t review_math_v3(const rf_math_schedule_state_v2* state,
          input->consecutive_failures});
     result->state = to_c_math_state(reviewed.state);
     result->event = to_c_math_event_v3(reviewed.event);
+  }, error_buffer, error_buffer_size);
+}
+
+size_t rf_review_action_v4_size(void) { return sizeof(rf_review_action_v4); }
+size_t rf_memory_replay_result_v4_size(void) {
+  return sizeof(rf_memory_replay_result_v4);
+}
+size_t rf_math_replay_result_v4_size(void) {
+  return sizeof(rf_math_replay_result_v4);
+}
+
+int32_t canonical_review_order_v4(
+    const rf_review_action_v4* actions, size_t action_count,
+    size_t* output_indices, size_t output_count,
+    char* error_buffer, size_t error_buffer_size) {
+  return invoke_v2([&] {
+    if (output_count != action_count || (output_count > 0 && output_indices == nullptr)) {
+      throw std::invalid_argument("canonical order output size mismatch");
+    }
+    const auto order = reviewfault::canonical_order_v4(
+        to_cpp_actions_v4(actions, action_count));
+    std::copy(order.begin(), order.end(), output_indices);
+  }, error_buffer, error_buffer_size);
+}
+
+int32_t replay_memory_history_v4(
+    const rf_memory_schedule_state_v2* initial_state,
+    const rf_review_action_v4* actions, size_t action_count,
+    const rf_memory_replay_config_v4* config,
+    rf_memory_replay_result_v4* result,
+    char* error_buffer, size_t error_buffer_size) {
+  return invoke_v2([&] {
+    if (initial_state == nullptr || config == nullptr || result == nullptr ||
+        initial_state->struct_size != sizeof(*initial_state) ||
+        config->struct_size != sizeof(*config) || result->struct_size != sizeof(*result)) {
+      throw std::invalid_argument("ABI v4 memory replay structure size mismatch");
+    }
+    const auto replay = reviewfault::replay_memory_history_v4(
+        to_cpp_memory_state(*initial_state), to_cpp_actions_v4(actions, action_count),
+        {static_cast<reviewfault::MemoryPreset>(config->preset),
+         config->calibration_improvement});
+    result->state = to_c_memory_state(replay.state);
+    result->action_count = replay.action_count;
+  }, error_buffer, error_buffer_size);
+}
+
+int32_t replay_math_history_v4(
+    const rf_math_schedule_state_v2* initial_state,
+    const rf_review_action_v4* actions, size_t action_count,
+    const rf_math_replay_config_v4* config,
+    rf_math_replay_result_v4* result,
+    char* error_buffer, size_t error_buffer_size) {
+  return invoke_v2([&] {
+    if (initial_state == nullptr || config == nullptr || result == nullptr ||
+        initial_state->struct_size != sizeof(*initial_state) ||
+        config->struct_size != sizeof(*config) || result->struct_size != sizeof(*result)) {
+      throw std::invalid_argument("ABI v4 math replay structure size mismatch");
+    }
+    const auto replay = reviewfault::replay_math_history_v4(
+        to_cpp_math_state(*initial_state), to_cpp_actions_v4(actions, action_count),
+        {static_cast<reviewfault::MathIntensity>(config->intensity)});
+    result->state = to_c_math_state(replay.state);
+    result->action_count = replay.action_count;
   }, error_buffer, error_buffer_size);
 }
 

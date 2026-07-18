@@ -35,16 +35,23 @@ public sealed record LibraryFilter(
     string Status = "all", bool IncludeDeleted = false, int Offset = 0, int Limit = 50);
 public sealed record DeletionState(IReadOnlyList<string> ItemIds, long DeletedAt, long UndoUntil);
 public sealed record TrashRow(string Id, string Kind, string Prompt, long DeletedAt);
+public sealed record SyncIdentity(string DeviceId, string? WorkspaceId, long Cursor, int PendingCount);
+public sealed record PulledOperation(
+    string OperationId, long ServerSeq, string DeviceId, long DeviceCounter,
+    string EntityType, string EntityId, string Action, JsonElement ChangedFields, long OccurredAt);
+public sealed record SyncMediaObject(string Sha256, string MimeType, long ByteCount, string FilePath);
+public sealed record MissingMediaObject(string Sha256, string FilePath);
 
 public sealed class AppRepository
 {
-    private const string AppVersion = "0.3.2";
+    private const string AppVersion = "0.4.0";
     private const long MaxBackupBytes = 2L * 1024 * 1024 * 1024;
     private const int MaxBackupEntries = 10_000;
     // The v1 review_log remains read-only input for gradual history replay.
     // v3 parameter checksums are foreign-keyed to algorithm_parameter_registry.
     private readonly string appDirectory;
     private readonly string connectionString;
+    private string deviceId = "";
 
     public AppRepository(string? dataDirectory = null)
     {
@@ -91,12 +98,600 @@ public sealed class AppRepository
             await command.ExecuteNonQueryAsync();
             current = 3;
         }
-        if (current != 3)
+        if (current == 3)
+        {
+            var migrationPath = Path.Combine(AppContext.BaseDirectory, "schema", "004_v0_4.sql");
+            var command = connection.CreateCommand();
+            command.CommandText = await File.ReadAllTextAsync(migrationPath);
+            await command.ExecuteNonQueryAsync();
+            current = 4;
+        }
+        if (current != 4)
         {
             throw new InvalidOperationException($"不支持的数据库版本：{current}");
         }
+        await EnsureDeviceIdentityAsync(connection);
         NativeScheduler.ValidateAbi();
     }
+
+    public async Task BindAccountAsync(string accountId, string workspaceId)
+    {
+        if (string.IsNullOrWhiteSpace(accountId) || string.IsNullOrWhiteSpace(workspaceId))
+            throw new ArgumentException("账号与 workspace 不能为空");
+        await using var connection = await OpenAsync();
+        await using var transaction = await connection.BeginTransactionAsync();
+        var query = connection.CreateCommand(); query.Transaction = (SqliteTransaction)transaction;
+        query.CommandText = "SELECT account_id, workspace_id FROM local_device WHERE singleton = 1";
+        await using var reader = await query.ExecuteReaderAsync(); await reader.ReadAsync();
+        var existingAccount = reader.IsDBNull(0) ? null : reader.GetString(0);
+        var existingWorkspace = reader.IsDBNull(1) ? null : reader.GetString(1);
+        await reader.DisposeAsync();
+        if (existingAccount is not null && (existingAccount != accountId || existingWorkspace != workspaceId))
+            throw new InvalidOperationException("此本地数据目录已绑定其他账号；请先导出备份并明确清除本地数据");
+        await ExecuteAsync(connection, transaction, """
+            UPDATE local_device SET account_id = $account, workspace_id = $workspace WHERE singleton = 1;
+            INSERT OR IGNORE INTO sync_cursor (workspace_id, server_seq, updated_at)
+              VALUES ($workspace, 0, $now);
+            """, ("$account", accountId), ("$workspace", workspaceId),
+            ("$now", DateTimeOffset.UtcNow.ToUnixTimeSeconds()));
+        await transaction.CommitAsync();
+    }
+
+    private sealed record ReviewFact(ReplayAction Action, uint DurationSeconds, string? ErrorReason, bool HintRevealed);
+
+    private async Task RebuildDirtySchedulesAsync()
+    {
+        var preferences = await GetLearningPreferencesAsync();
+        var preset = preferences.MemoryPreset switch { "time_saving" => 0, "reinforced" => 2, _ => 1 };
+        var intensity = preferences.MathIntensity switch { "intensive" => 0, "relaxed" => 2, _ => 1 };
+        await using var connection = await OpenAsync();
+        var dirtyCommand = connection.CreateCommand(); dirtyCommand.CommandText = """
+            SELECT c.study_item_id, i.kind FROM schedule_cache_v4 c
+            JOIN study_item i ON i.id = c.study_item_id WHERE c.dirty = 1
+            """;
+        var dirty = new List<(string Id, string Kind)>();
+        await using (var reader = await dirtyCommand.ExecuteReaderAsync())
+            while (await reader.ReadAsync()) dirty.Add((reader.GetString(0), reader.GetString(1)));
+        if (dirty.Count == 0) return;
+        await using var transaction = await connection.BeginTransactionAsync();
+        foreach (var (id, kind) in dirty)
+        {
+            var facts = await ReviewFactsAsync(connection, transaction, id);
+            var order = NativeScheduler.CanonicalOrderV4(facts.Select(value => value.Action).ToArray());
+            long dueAt;
+            if (kind == "memory_card")
+            {
+                var card = new ScheduleCard(CardState.New, 0, 0, 0, 0, 0, 0); uint consecutiveLapses = 0;
+                for (var history = 0; history < order.Length; history++)
+                {
+                    var fact = facts[order[history]]; var effective = Math.Max(fact.Action.ReviewedAt, card.LastReviewedAt);
+                    var result = NativeScheduler.ReviewMemoryV3(card, (Rating)fact.Action.Feedback,
+                        effective, preset, (uint)history, 0, consecutiveLapses);
+                    card = result.Card; consecutiveLapses = fact.Action.Feedback == 1 ? consecutiveLapses + 1 : 0;
+                }
+                dueAt = card.DueAt;
+                await ExecuteAsync(connection, transaction, """
+                    UPDATE schedule_state_v2 SET due_at = $due, last_reviewed_at = $last,
+                      repetitions = $repetitions, updated_at = $now WHERE study_item_id = $id;
+                    UPDATE memory_schedule_state SET state = $state, difficulty = $difficulty,
+                      stability_days = $stability, lapses = $lapses WHERE study_item_id = $id;
+                    UPDATE study_item SET scheduler_state = $state, difficulty = $difficulty,
+                      stability_days = $stability, due_at = $due, last_reviewed_at = $last,
+                      repetitions = $repetitions, lapses = $lapses, updated_at = $now
+                      WHERE id = $id;
+                    """, ("$state", (int)card.State), ("$difficulty", card.Difficulty),
+                    ("$stability", card.StabilityDays), ("$due", card.DueAt), ("$last", card.LastReviewedAt),
+                    ("$repetitions", card.Repetitions), ("$lapses", card.Lapses), ("$id", id),
+                    ("$now", DateTimeOffset.UtcNow.ToUnixTimeSeconds()));
+            }
+            else
+            {
+                uint mastery = 0, streak = 0, repetitions = 0, failures = 0, lapses = 0;
+                long last = 0; dueAt = 0; double scheduledDays = 0;
+                foreach (var index in order)
+                {
+                    var fact = facts[index]; var effective = Math.Max(fact.Action.ReviewedAt, last);
+                    var result = NativeScheduler.ReviewMathV3(mastery, streak, dueAt, last, repetitions,
+                        fact.Action.Feedback, ErrorReasonCode(fact.ErrorReason), fact.HintRevealed,
+                        effective, intensity, fact.DurationSeconds, 0, failures);
+                    mastery = result.MasteryLevel; streak = result.FluentStreak; repetitions = result.Repetitions;
+                    dueAt = result.DueAt; last = result.LastReviewedAt; scheduledDays = result.ScheduledDays;
+                    if (fact.Action.Feedback <= 1) lapses++;
+                    failures = fact.Action.Feedback <= 1 ? failures + 1 : 0;
+                }
+                await ExecuteAsync(connection, transaction, """
+                    UPDATE schedule_state_v2 SET due_at = $due, last_reviewed_at = $last,
+                      repetitions = $repetitions, updated_at = $now WHERE study_item_id = $id;
+                    UPDATE math_schedule_state SET mastery_level = $mastery, fluent_streak = $streak
+                      WHERE study_item_id = $id;
+                    UPDATE study_item SET scheduler_state = $state, difficulty = $difficulty,
+                      stability_days = $stability, due_at = $due, last_reviewed_at = $last,
+                      repetitions = $repetitions, lapses = $lapses, updated_at = $now
+                      WHERE id = $id;
+                    """, ("$due", dueAt), ("$last", last), ("$repetitions", repetitions),
+                    ("$id", id), ("$mastery", mastery), ("$streak", streak),
+                    ("$state", repetitions == 0 ? (int)CardState.New : (int)CardState.Review),
+                    ("$difficulty", repetitions == 0 ? 0 : mastery + 1),
+                    ("$stability", scheduledDays), ("$lapses", lapses),
+                    ("$now", DateTimeOffset.UtcNow.ToUnixTimeSeconds()));
+            }
+            await ExecuteAsync(connection, transaction, """
+                UPDATE schedule_cache_v4 SET due_at = $due, replayed_action_count = $count,
+                  dirty = 0, rebuilt_at = $now WHERE study_item_id = $id
+                """, ("$due", dueAt), ("$count", facts.Count),
+                ("$now", DateTimeOffset.UtcNow.ToUnixTimeSeconds()), ("$id", id));
+        }
+        await transaction.CommitAsync();
+    }
+
+    private static async Task<List<ReviewFact>> ReviewFactsAsync(
+        SqliteConnection connection, System.Data.Common.DbTransaction transaction, string itemId)
+    {
+        var command = connection.CreateCommand(); command.Transaction = (SqliteTransaction)transaction;
+        command.CommandText = """
+            SELECT action_id, device_id, device_counter, causal_cursor, feedback, reviewed_at,
+              COALESCE(duration_seconds, 0), error_reason, hint_revealed
+            FROM review_action_v4 WHERE study_item_id = $id
+            """;
+        command.Parameters.AddWithValue("$id", itemId); var facts = new List<ReviewFact>();
+        await using var reader = await command.ExecuteReaderAsync();
+        while (await reader.ReadAsync()) facts.Add(new ReviewFact(new ReplayAction(
+            reader.GetString(0), reader.GetString(1), checked((ulong)reader.GetInt64(2)),
+            checked((ulong)reader.GetInt64(3)), reader.GetInt32(4), reader.GetInt64(5)),
+            checked((uint)reader.GetInt64(6)), reader.IsDBNull(7) ? null : reader.GetString(7), reader.GetInt32(8) != 0));
+        return facts;
+    }
+
+    private static int ErrorReasonCode(string? value) => value switch {
+        "concept" => 1, "approach" => 2, "calculation" => 3, "misread" => 4,
+        "forgotten_fact" => 5, "timeout" => 6, "other" => 7, _ => 0,
+    };
+
+    public async Task<SyncIdentity> SyncIdentityAsync()
+    {
+        await using var connection = await OpenAsync();
+        var command = connection.CreateCommand();
+        command.CommandText = """
+            SELECT d.device_id, d.workspace_id,
+              COALESCE((SELECT server_seq FROM sync_cursor WHERE workspace_id = d.workspace_id), 0),
+              (SELECT COUNT(*) FROM sync_outbox)
+            FROM local_device d WHERE singleton = 1
+            """;
+        await using var reader = await command.ExecuteReaderAsync(); await reader.ReadAsync();
+        return new SyncIdentity(reader.GetString(0), reader.IsDBNull(1) ? null : reader.GetString(1),
+            reader.GetInt64(2), reader.GetInt32(3));
+    }
+
+    public async Task<JsonElement> PendingSyncOperationsAsync(int limit = 200)
+    {
+        await using var connection = await OpenAsync();
+        var command = connection.CreateCommand();
+        command.CommandText = """
+            SELECT operation_id, device_id, device_counter, base_cursor, base_revision,
+              entity_type, entity_id, action, changed_fields_json, occurred_at
+            FROM sync_outbox ORDER BY device_counter LIMIT $limit
+            """;
+        command.Parameters.AddWithValue("$limit", Math.Clamp(limit, 1, 500));
+        await using var reader = await command.ExecuteReaderAsync();
+        var rows = new List<object>();
+        while (await reader.ReadAsync()) rows.Add(new {
+            operationId = reader.GetString(0), deviceId = reader.GetString(1),
+            deviceCounter = reader.GetInt64(2), baseCursor = reader.GetInt64(3),
+            baseRevision = reader.GetInt64(4), entityType = reader.GetString(5),
+            entityId = reader.GetString(6), action = reader.GetString(7),
+            changedFields = JsonDocument.Parse(reader.GetString(8)).RootElement.Clone(),
+            occurredAt = reader.GetInt64(9),
+        });
+        return JsonSerializer.SerializeToElement(rows);
+    }
+
+    public async Task AcknowledgeSyncOperationsAsync(IReadOnlySet<string> operationIds)
+    {
+        if (operationIds.Count == 0) return;
+        await using var connection = await OpenAsync(); await using var transaction = await connection.BeginTransactionAsync();
+        foreach (var id in operationIds)
+            await ExecuteAsync(connection, transaction, "DELETE FROM sync_outbox WHERE operation_id = $id", ("$id", id));
+        await transaction.CommitAsync();
+    }
+
+    public async Task<IReadOnlyList<SyncMediaObject>> MediaForSyncAsync()
+    {
+        await using var connection = await OpenAsync(); var command = connection.CreateCommand();
+        command.CommandText = "SELECT sha256, mime_type, byte_count, relative_path FROM media WHERE deleted_at IS NULL";
+        await using var reader = await command.ExecuteReaderAsync(); var values = new List<SyncMediaObject>();
+        while (await reader.ReadAsync())
+        {
+            var path = ResolveMediaPath(reader.GetString(3));
+            if (File.Exists(path)) values.Add(new SyncMediaObject(reader.GetString(0), reader.GetString(1), reader.GetInt64(2), path));
+        }
+        return values;
+    }
+
+    public async Task<IReadOnlyList<MissingMediaObject>> MissingMediaAsync()
+    {
+        await using var connection = await OpenAsync(); var command = connection.CreateCommand();
+        command.CommandText = "SELECT sha256, relative_path FROM media WHERE deleted_at IS NULL";
+        await using var reader = await command.ExecuteReaderAsync(); var values = new List<MissingMediaObject>();
+        while (await reader.ReadAsync())
+        {
+            var path = ResolveMediaPath(reader.GetString(1));
+            if (!File.Exists(path)) values.Add(new MissingMediaObject(reader.GetString(0), path));
+        }
+        return values;
+    }
+
+    public static async Task SaveDownloadedMediaAsync(MissingMediaObject media, byte[] bytes)
+    {
+        var actual = Convert.ToHexString(SHA256.HashData(bytes)).ToLowerInvariant();
+        if (actual != media.Sha256) throw new InvalidDataException("下载媒体哈希不匹配");
+        Directory.CreateDirectory(Path.GetDirectoryName(media.FilePath)!);
+        var temporary = media.FilePath + "." + Guid.NewGuid() + ".tmp";
+        await File.WriteAllBytesAsync(temporary, bytes);
+        if (File.Exists(media.FilePath)) File.Delete(temporary); else File.Move(temporary, media.FilePath);
+    }
+
+    public async Task ApplyPulledOperationsAsync(
+        string workspaceId, IReadOnlyList<PulledOperation> operations, long cursor)
+    {
+        await using var connection = await OpenAsync(); await using var transaction = await connection.BeginTransactionAsync();
+        foreach (var operation in operations.OrderBy(value => value.ServerSeq))
+        {
+            var counterCommand = connection.CreateCommand();
+            counterCommand.Transaction = (SqliteTransaction)transaction;
+            counterCommand.CommandText = "SELECT next_counter FROM local_device WHERE singleton = 1";
+            var remoteApplyCounterStart = Convert.ToInt64(await counterCommand.ExecuteScalarAsync());
+            if (operation.EntityType == "studyItem")
+                await ApplyRemoteStudyItemAsync(connection, transaction, operation);
+            else if (operation.EntityType == "memoryCard")
+                await ApplyRemoteMemoryCardAsync(connection, transaction, operation);
+            else if (operation.EntityType == "mathProblem")
+                await ApplyRemoteMathProblemAsync(connection, transaction, operation);
+            else if (operation.EntityType == "tag")
+                await ApplyRemoteTagAsync(connection, transaction, operation);
+            else if (operation.EntityType == "relation")
+                await ApplyRemoteRelationAsync(connection, transaction, operation);
+            else if (operation.EntityType == "learningPreferences")
+                await ApplyRemoteLearningPreferencesAsync(connection, transaction, operation);
+            else if (operation.EntityType == "attemptArtifact")
+                await ApplyRemoteAttemptArtifactAsync(connection, transaction, operation);
+            else if (operation.EntityType == "reviewAction")
+                await ApplyRemoteReviewActionAsync(connection, transaction, operation);
+            // Content triggers serve ordinary local writes too. Remove only operations
+            // created while projecting this pulled fact so it is not echoed to the service.
+            await ExecuteAsync(connection, transaction, """
+                DELETE FROM sync_outbox
+                WHERE device_id = (SELECT device_id FROM local_device WHERE singleton = 1)
+                  AND device_counter >= $counter;
+                DELETE FROM relation_operation
+                WHERE device_id = (SELECT device_id FROM local_device WHERE singleton = 1)
+                  AND device_counter >= $counter;
+                """, ("$counter", remoteApplyCounterStart));
+            await ExecuteAsync(connection, transaction, """
+                INSERT INTO sync_revision (entity_type, entity_id, revision, server_seq, deleted)
+                VALUES ($type, $id, 1, $seq, $deleted)
+                ON CONFLICT(entity_type, entity_id) DO UPDATE SET
+                  revision = revision + 1, server_seq = MAX(server_seq, excluded.server_seq),
+                  deleted = excluded.deleted
+                """, ("$type", operation.EntityType), ("$id", operation.EntityId),
+                ("$seq", operation.ServerSeq), ("$deleted", operation.Action == "delete" ? 1 : 0));
+        }
+        await ExecuteAsync(connection, transaction, """
+            INSERT INTO sync_cursor (workspace_id, server_seq, updated_at) VALUES ($workspace, $cursor, $now)
+            ON CONFLICT(workspace_id) DO UPDATE SET server_seq = MAX(server_seq, excluded.server_seq),
+              updated_at = excluded.updated_at
+            """, ("$workspace", workspaceId), ("$cursor", cursor),
+            ("$now", DateTimeOffset.UtcNow.ToUnixTimeSeconds()));
+        await transaction.CommitAsync();
+        await RebuildDirtySchedulesAsync();
+    }
+
+    private static async Task ApplyRemoteStudyItemAsync(
+        SqliteConnection connection, System.Data.Common.DbTransaction transaction, PulledOperation operation)
+    {
+        var fields = operation.ChangedFields;
+        var lookup = connection.CreateCommand(); lookup.Transaction = (SqliteTransaction)transaction;
+        lookup.CommandText = "SELECT kind FROM study_item WHERE id = $id";
+        lookup.Parameters.AddWithValue("$id", operation.EntityId);
+        var existing = (string?)await lookup.ExecuteScalarAsync();
+        var kind = fields.TryGetProperty("kind", out var kindValue) ? kindValue.GetString()! : existing ?? "memory_card";
+        var now = fields.TryGetProperty("updatedAt", out var updated) ? updated.GetInt64() : operation.OccurredAt;
+        if (existing is null)
+        {
+            await ExecuteAsync(connection, transaction, """
+                INSERT INTO study_item (id, kind, subject, created_at, updated_at, deleted_at)
+                VALUES ($id, $kind, $subject, $created, $updated, $deleted)
+                """, ("$id", operation.EntityId), ("$kind", kind),
+                ("$subject", Text(fields, "subject", kind == "math_problem" ? "math" : "operating_systems")),
+                ("$created", Long(fields, "createdAt", operation.OccurredAt)), ("$updated", now),
+                ("$deleted", operation.Action == "delete" ? operation.OccurredAt : DBNull.Value));
+            if (kind == "memory_card")
+                await ExecuteAsync(connection, transaction, """
+                    INSERT INTO memory_card (study_item_id, template_type, prompt_markdown, answer_markdown,
+                      hints_json, answer_points_json) VALUES ($id, $template, $prompt, $answer, $hints, $points)
+                    """, ("$id", operation.EntityId), ("$template", Text(fields, "templateType", "qa")),
+                    ("$prompt", Text(fields, "prompt")), ("$answer", Text(fields, "answer")),
+                    ("$hints", Raw(fields, "hints", "[]")), ("$points", Raw(fields, "answerPoints", "[]")));
+            else
+                await ExecuteAsync(connection, transaction, """
+                    INSERT INTO math_problem (study_item_id, source_name, solution_markdown,
+                      wrong_step_markdown, key_hint_markdown) VALUES ($id, $source, $solution, $wrong, $hint)
+                    """, ("$id", operation.EntityId), ("$source", Text(fields, "sourceName")),
+                    ("$solution", Text(fields, "solution")), ("$wrong", Text(fields, "wrongStep")),
+                    ("$hint", Text(fields, "keyHint")));
+            if (kind == "math_problem" && fields.TryGetProperty("media", out var media))
+                await AttachRemoteMediaMetadataAsync(connection, transaction, operation.EntityId, media, operation.OccurredAt);
+            return;
+        }
+        await ExecuteAsync(connection, transaction, """
+            UPDATE study_item SET subject = COALESCE($subject, subject), updated_at = $updated,
+              deleted_at = CASE WHEN $action = 'delete' THEN $occurred
+                                WHEN $action = 'restore' THEN NULL ELSE deleted_at END WHERE id = $id
+            """, ("$subject", fields.TryGetProperty("subject", out var subject) ? subject.GetString()! : DBNull.Value),
+            ("$updated", now), ("$action", operation.Action), ("$occurred", operation.OccurredAt), ("$id", operation.EntityId));
+        if (kind == "memory_card")
+            await ExecuteAsync(connection, transaction, """
+                UPDATE memory_card SET prompt_markdown = COALESCE($prompt, prompt_markdown),
+                  answer_markdown = COALESCE($answer, answer_markdown),
+                  template_type = COALESCE($template, template_type),
+                  hints_json = COALESCE($hints, hints_json),
+                  answer_points_json = COALESCE($points, answer_points_json)
+                  WHERE study_item_id = $id
+                """, ("$prompt", OptionalText(fields, "prompt")), ("$answer", OptionalText(fields, "answer")),
+                ("$template", OptionalText(fields, "templateType")),
+                ("$hints", OptionalRaw(fields, "hints")), ("$points", OptionalRaw(fields, "answerPoints")),
+                ("$id", operation.EntityId));
+        else
+            await ExecuteAsync(connection, transaction, """
+                UPDATE math_problem SET source_name = COALESCE($source, source_name),
+                  solution_markdown = COALESCE($solution, solution_markdown),
+                  wrong_step_markdown = COALESCE($wrong, wrong_step_markdown),
+                  key_hint_markdown = COALESCE($hint, key_hint_markdown) WHERE study_item_id = $id
+                """, ("$source", OptionalText(fields, "sourceName")), ("$solution", OptionalText(fields, "solution")),
+                ("$wrong", OptionalText(fields, "wrongStep")), ("$hint", OptionalText(fields, "keyHint")),
+                ("$id", operation.EntityId));
+        if (kind == "math_problem" && fields.TryGetProperty("media", out var updatedMedia))
+            await AttachRemoteMediaMetadataAsync(connection, transaction, operation.EntityId, updatedMedia, operation.OccurredAt);
+    }
+
+    private static async Task AttachRemoteMediaMetadataAsync(
+        SqliteConnection connection, System.Data.Common.DbTransaction transaction,
+        string problemId, JsonElement values, long createdAt)
+    {
+        var index = 0;
+        foreach (var value in values.EnumerateArray())
+        {
+            var sha = value.GetProperty("sha256").GetString()!; var mime = value.GetProperty("mimeType").GetString()!;
+            var extension = mime switch { "image/png" => "png", "image/webp" => "webp",
+                "application/gzip" => "reviewfault-ink.gz", _ => "jpg" };
+            await ExecuteAsync(connection, transaction, """
+                INSERT OR IGNORE INTO media (id, sha256, mime_type, byte_count, relative_path, created_at)
+                VALUES ($id, $sha, $mime, $bytes, $path, $created)
+                """, ("$id", NewId()), ("$sha", sha), ("$mime", mime),
+                ("$bytes", value.GetProperty("byteCount").GetInt64()), ("$path", Path.Combine("media", $"{sha}.{extension}")),
+                ("$created", createdAt));
+            var lookup = connection.CreateCommand(); lookup.Transaction = (SqliteTransaction)transaction;
+            lookup.CommandText = "SELECT id FROM media WHERE sha256 = $sha"; lookup.Parameters.AddWithValue("$sha", sha);
+            var mediaId = (string)(await lookup.ExecuteScalarAsync())!;
+            await ExecuteAsync(connection, transaction, """
+                INSERT OR IGNORE INTO math_problem_media (math_problem_id, media_id, role, sort_order)
+                VALUES ($problem, $media, 'prompt', $sort)
+                """, ("$problem", problemId), ("$media", mediaId), ("$sort", index++));
+        }
+    }
+
+    private static async Task ApplyRemoteMemoryCardAsync(
+        SqliteConnection connection, System.Data.Common.DbTransaction transaction, PulledOperation operation)
+    {
+        var fields = operation.ChangedFields;
+        await ExecuteAsync(connection, transaction, """
+            UPDATE memory_card SET
+              template_type = COALESCE($template, template_type),
+              prompt_markdown = COALESCE($prompt, prompt_markdown),
+              answer_markdown = COALESCE($answer, answer_markdown),
+              hints_json = COALESCE($hints, hints_json),
+              answer_points_json = COALESCE($points, answer_points_json),
+              occlusions_json = COALESCE($occlusions, occlusions_json)
+            WHERE study_item_id = $id
+            """, ("$template", OptionalText(fields, "templateType")),
+            ("$prompt", OptionalText(fields, "promptMarkdown")),
+            ("$answer", OptionalText(fields, "answerMarkdown")),
+            ("$hints", OptionalRaw(fields, "hints")),
+            ("$points", OptionalRaw(fields, "answerPoints")),
+            ("$occlusions", OptionalRaw(fields, "occlusions")), ("$id", operation.EntityId));
+    }
+
+    private static async Task ApplyRemoteMathProblemAsync(
+        SqliteConnection connection, System.Data.Common.DbTransaction transaction, PulledOperation operation)
+    {
+        var fields = operation.ChangedFields;
+        await ExecuteAsync(connection, transaction, """
+            UPDATE math_problem SET
+              source_name = COALESCE($source, source_name),
+              prompt_markdown = COALESCE($prompt, prompt_markdown),
+              solution_markdown = COALESCE($solution, solution_markdown),
+              wrong_step_markdown = COALESCE($wrong, wrong_step_markdown),
+              key_hint_markdown = COALESCE($hint, key_hint_markdown),
+              default_error_reason = COALESCE($reason, default_error_reason)
+            WHERE study_item_id = $id
+            """, ("$source", OptionalText(fields, "sourceName")),
+            ("$prompt", OptionalText(fields, "promptMarkdown")),
+            ("$solution", OptionalText(fields, "solutionMarkdown")),
+            ("$wrong", OptionalText(fields, "wrongStepMarkdown")),
+            ("$hint", OptionalText(fields, "keyHintMarkdown")),
+            ("$reason", OptionalText(fields, "defaultErrorReason")), ("$id", operation.EntityId));
+    }
+
+    private static async Task ApplyRemoteTagAsync(
+        SqliteConnection connection, System.Data.Common.DbTransaction transaction, PulledOperation operation)
+    {
+        var name = Text(operation.ChangedFields, "name");
+        if (string.IsNullOrWhiteSpace(name)) return;
+        await ExecuteAsync(connection, transaction, """
+            INSERT OR IGNORE INTO tag (id, name, created_at, updated_at, deleted_at)
+            VALUES ($id, $name, $now, $now, $deleted);
+            UPDATE tag SET name = $name, updated_at = $now, deleted_at = $deleted
+            WHERE id = $id;
+            """, ("$id", operation.EntityId), ("$name", name), ("$now", operation.OccurredAt),
+            ("$deleted", operation.Action == "delete" ? operation.OccurredAt : DBNull.Value));
+    }
+
+    private static async Task ApplyRemoteRelationAsync(
+        SqliteConnection connection, System.Data.Common.DbTransaction transaction, PulledOperation operation)
+    {
+        var fields = operation.ChangedFields;
+        if (Text(fields, "relationType") != "study_item_tag") return;
+        var source = Text(fields, "sourceId"); var target = Text(fields, "targetId");
+        if (source.Length == 0 || target.Length == 0 || operation.Action is not ("add" or "remove")) return;
+        var observedAdds = fields.TryGetProperty("observedAdds", out var observed) &&
+            observed.ValueKind == JsonValueKind.Array ? observed.GetRawText() : "[]";
+        await ExecuteAsync(connection, transaction, """
+            INSERT OR IGNORE INTO relation_operation (operation_id, relation_type, source_id,
+              target_id, action, device_id, device_counter, observed_adds_json, occurred_at)
+            VALUES ($operation, 'study_item_tag', $source, $target, $action, $device,
+              $counter, $observed, $occurred)
+            """, ("$operation", operation.OperationId), ("$source", source), ("$target", target),
+            ("$action", operation.Action), ("$device", operation.DeviceId),
+            ("$counter", operation.DeviceCounter), ("$observed", observedAdds),
+            ("$occurred", operation.OccurredAt));
+        var active = connection.CreateCommand(); active.Transaction = (SqliteTransaction)transaction;
+        active.CommandText = """
+            SELECT EXISTS (
+              SELECT 1 FROM relation_operation add_op
+              WHERE add_op.relation_type = 'study_item_tag'
+                AND add_op.source_id = $source AND add_op.target_id = $target
+                AND add_op.action = 'add'
+                AND NOT EXISTS (
+                  SELECT 1 FROM relation_operation remove_op,
+                    json_each(remove_op.observed_adds_json) observed
+                  WHERE remove_op.relation_type = add_op.relation_type
+                    AND remove_op.source_id = add_op.source_id
+                    AND remove_op.target_id = add_op.target_id
+                    AND remove_op.action = 'remove' AND observed.value = add_op.operation_id
+                )
+            )
+            """;
+        active.Parameters.AddWithValue("$source", source); active.Parameters.AddWithValue("$target", target);
+        if (Convert.ToInt32(await active.ExecuteScalarAsync()) != 0)
+            await ExecuteAsync(connection, transaction,
+                """
+                INSERT OR IGNORE INTO study_item_tag (study_item_id, tag_id)
+                SELECT $source, $target
+                WHERE EXISTS (SELECT 1 FROM study_item WHERE id = $source)
+                  AND EXISTS (SELECT 1 FROM tag WHERE id = $target)
+                """, ("$source", source), ("$target", target));
+        else
+            await ExecuteAsync(connection, transaction,
+                "DELETE FROM study_item_tag WHERE study_item_id = $source AND tag_id = $target",
+                ("$source", source), ("$target", target));
+    }
+
+    private static async Task ApplyRemoteLearningPreferencesAsync(
+        SqliteConnection connection, System.Data.Common.DbTransaction transaction, PulledOperation operation)
+    {
+        var fields = operation.ChangedFields;
+        await ExecuteAsync(connection, transaction, """
+            UPDATE learning_preferences SET
+              daily_new_memory_limit = COALESCE($limit, daily_new_memory_limit),
+              session_minutes = COALESCE($minutes, session_minutes),
+              memory_preset = COALESCE($memory, memory_preset),
+              math_intensity = COALESCE($math, math_intensity),
+              scheduler_generation = COALESCE($generation, scheduler_generation),
+              updated_at = $now WHERE singleton = 1
+            """, ("$limit", OptionalLong(fields, "dailyNewMemoryLimit")),
+            ("$minutes", OptionalLong(fields, "sessionMinutes")),
+            ("$memory", OptionalText(fields, "memoryPreset")),
+            ("$math", OptionalText(fields, "mathIntensity")),
+            ("$generation", OptionalLong(fields, "schedulerGeneration")),
+            ("$now", operation.OccurredAt));
+    }
+
+    private static async Task ApplyRemoteAttemptArtifactAsync(
+        SqliteConnection connection, System.Data.Common.DbTransaction transaction, PulledOperation operation)
+    {
+        var fields = operation.ChangedFields;
+        var attemptId = Text(fields, "attemptId"); var studyItemId = Text(fields, "studyItemId");
+        var artifactType = Text(fields, "artifactType"); var sha = Text(fields, "mediaSha256");
+        var mime = Text(fields, "mediaMimeType"); var byteCount = Long(fields, "mediaByteCount", 0);
+        var attemptResult = Text(fields, "result", "effortful");
+        var errorReason = Text(fields, "errorReason");
+        if (attemptId.Length == 0 || studyItemId.Length == 0 || sha.Length != 64 ||
+            mime.Length == 0 || byteCount <= 0 ||
+            artifactType is not ("reviewfault-ink-v1" or "png-preview" or "annotated-image") ||
+            attemptResult is not ("again" or "wrong" or "effortful" or "fluent") ||
+            errorReason is not ("" or "concept" or "approach" or "calculation" or "misread" or
+                "forgotten_fact" or "timeout" or "other")) return;
+        await ExecuteAsync(connection, transaction, """
+            INSERT OR IGNORE INTO attempt (id, math_problem_id, started_at, finished_at,
+              result, error_reason, created_at)
+            SELECT $attempt, $item, $started, $finished, $result, $reason, $created
+            WHERE EXISTS (SELECT 1 FROM math_problem WHERE study_item_id = $item);
+            INSERT OR IGNORE INTO media (id, sha256, mime_type, byte_count, relative_path, created_at)
+            VALUES ($media, $sha, $mime, $bytes, $path, $created);
+            """, ("$attempt", attemptId), ("$item", studyItemId),
+            ("$started", Long(fields, "startedAt", operation.OccurredAt)),
+            ("$finished", OptionalLong(fields, "finishedAt")),
+            ("$result", attemptResult), ("$reason", errorReason.Length == 0 ? DBNull.Value : errorReason),
+            ("$created", operation.OccurredAt),
+            ("$media", NewId()), ("$sha", sha), ("$mime", mime), ("$bytes", byteCount),
+            ("$path", Path.Combine("media", sha + MediaExtension(mime))));
+        var lookup = connection.CreateCommand(); lookup.Transaction = (SqliteTransaction)transaction;
+        lookup.CommandText = "SELECT id FROM media WHERE sha256 = $sha"; lookup.Parameters.AddWithValue("$sha", sha);
+        var mediaId = (string?)(await lookup.ExecuteScalarAsync());
+        if (mediaId is null) return;
+        await ExecuteAsync(connection, transaction, """
+            INSERT OR IGNORE INTO attempt_artifact (id, attempt_id, artifact_type, media_id,
+              background_media_sha256, page_count, created_at)
+            SELECT $id, $attempt, $type, $media, $background, $pages, $created
+            WHERE EXISTS (SELECT 1 FROM attempt WHERE id = $attempt)
+            """, ("$id", operation.EntityId), ("$attempt", attemptId), ("$type", artifactType),
+            ("$media", mediaId), ("$background", OptionalText(fields, "backgroundMediaSha256")),
+            ("$pages", Math.Max(1, Long(fields, "pageCount", 1))), ("$created", operation.OccurredAt));
+    }
+
+    private static string MediaExtension(string mime) => mime switch {
+        "image/png" => ".png", "image/webp" => ".webp",
+        "application/gzip" => ".reviewfault-ink.gz", _ => ".jpg",
+    };
+
+    private static async Task ApplyRemoteReviewActionAsync(
+        SqliteConnection connection, System.Data.Common.DbTransaction transaction, PulledOperation operation)
+    {
+        var fields = operation.ChangedFields; var itemId = fields.GetProperty("studyItemId").GetString()!;
+        var lookup = connection.CreateCommand(); lookup.Transaction = (SqliteTransaction)transaction;
+        lookup.CommandText = "SELECT COUNT(*) FROM study_item WHERE id = $id"; lookup.Parameters.AddWithValue("$id", itemId);
+        if (Convert.ToInt32(await lookup.ExecuteScalarAsync()) == 0) return;
+        await ExecuteAsync(connection, transaction, """
+            INSERT OR IGNORE INTO review_action_v4 (action_id, study_item_id, algorithm, feedback,
+              reviewed_at, duration_seconds, error_reason, hint_revealed, device_id, device_counter,
+              causal_cursor, source_generation, created_at)
+            VALUES ($action, $item, $algorithm, $feedback, $reviewed, $duration, $reason,
+              $hint, $device, $counter, $cursor, 4, $created);
+            UPDATE schedule_cache_v4 SET dirty = 1 WHERE study_item_id = $item;
+            """, ("$action", operation.EntityId), ("$item", itemId),
+            ("$algorithm", fields.GetProperty("algorithm").GetString()!),
+            ("$feedback", fields.GetProperty("feedback").GetInt32()),
+            ("$reviewed", fields.GetProperty("reviewedAt").GetInt64()),
+            ("$duration", Long(fields, "durationSeconds", 0)), ("$reason", OptionalText(fields, "errorReason")),
+            ("$hint", fields.TryGetProperty("hintRevealed", out var hint) && hint.GetBoolean() ? 1 : 0),
+            ("$device", operation.DeviceId), ("$counter", operation.DeviceCounter),
+            ("$cursor", operation.ServerSeq), ("$created", operation.OccurredAt));
+    }
+
+    private static string Text(JsonElement value, string name, string fallback = "") =>
+        value.TryGetProperty(name, out var property) && property.ValueKind == JsonValueKind.String
+            ? property.GetString() ?? fallback : fallback;
+    private static object OptionalText(JsonElement value, string name) =>
+        value.TryGetProperty(name, out var property) && property.ValueKind == JsonValueKind.String
+            ? property.GetString()! : DBNull.Value;
+    private static object OptionalRaw(JsonElement value, string name) =>
+        value.TryGetProperty(name, out var property) ? property.GetRawText() : DBNull.Value;
+    private static object OptionalLong(JsonElement value, string name) =>
+        value.TryGetProperty(name, out var property) && property.TryGetInt64(out var result)
+            ? result : DBNull.Value;
+    private static long Long(JsonElement value, string name, long fallback) =>
+        value.TryGetProperty(name, out var property) && property.TryGetInt64(out var result) ? result : fallback;
+    private static string Raw(JsonElement value, string name, string fallback) =>
+        value.TryGetProperty(name, out var property) ? property.GetRawText() : fallback;
 
     public async Task<DashboardSummary> DashboardAsync(long now, long dayStart)
     {
@@ -341,9 +936,11 @@ public sealed class AppRepository
         await using var connection = await OpenAsync();
         await using var transaction = await connection.BeginTransactionAsync();
         foreach (var id in itemIds)
+        {
             await ExecuteAsync(connection, transaction,
                 "UPDATE study_item SET deleted_at = $now, updated_at = $now WHERE id = $id AND deleted_at IS NULL",
                 ("$now", now), ("$id", id));
+        }
         await transaction.CommitAsync();
         return new DeletionState(itemIds, now, now + 10);
     }
@@ -352,10 +949,13 @@ public sealed class AppRepository
     {
         await using var connection = await OpenAsync();
         await using var transaction = await connection.BeginTransactionAsync();
+        var now = DateTimeOffset.UtcNow.ToUnixTimeSeconds();
         foreach (var id in itemIds)
+        {
             await ExecuteAsync(connection, transaction,
                 "UPDATE study_item SET deleted_at = NULL, updated_at = $now WHERE id = $id",
-                ("$now", DateTimeOffset.UtcNow.ToUnixTimeSeconds()), ("$id", id));
+                ("$now", now), ("$id", id));
+        }
         await transaction.CommitAsync();
     }
 
@@ -399,6 +999,7 @@ public sealed class AppRepository
             lookup.CommandText = "SELECT id FROM tag WHERE name = $name COLLATE NOCASE";
             lookup.Parameters.AddWithValue("$name", name);
             tagId = (string)(await lookup.ExecuteScalarAsync())!;
+            await EnqueueSyncAsync(connection, transaction, "tag", tagId, "create", new { name }, now);
             await ExecuteAsync(connection, transaction,
                 "INSERT INTO study_item_tag (study_item_id, tag_id) VALUES ($item, $tag)",
                 ("$item", itemId), ("$tag", tagId));
@@ -514,6 +1115,10 @@ public sealed class AppRepository
                 VALUES ($problem, $media, 'prompt', $sort)
                 """, ("$problem", problemId), ("$media", storedMediaId), ("$sort", index));
         }
+        await EnqueueSyncAsync(connection, transaction, "studyItem", problemId, "update", new {
+            media = prepared.Select(item => new { sha256 = item.Hash, byteCount = item.ByteCount,
+                mimeType = item.Extension switch { ".png" => "image/png", ".webp" => "image/webp", _ => "image/jpeg" } }),
+        }, now);
         await transaction.CommitAsync();
         return problemId;
     }
@@ -542,8 +1147,8 @@ public sealed class AppRepository
         string keyHint,
         string? errorReason)
     {
-        await using var connection = await OpenAsync();
-        var command = connection.CreateCommand();
+        await using var connection = await OpenAsync(); await using var transaction = await connection.BeginTransactionAsync();
+        var command = connection.CreateCommand(); command.Transaction = (SqliteTransaction)transaction;
         command.CommandText = """
             UPDATE math_problem SET solution_markdown = $solution,
               wrong_step_markdown = $wrongStep, key_hint_markdown = $keyHint,
@@ -556,15 +1161,16 @@ public sealed class AppRepository
         command.Parameters.AddWithValue("$keyHint", keyHint.Trim());
         command.Parameters.AddWithValue("$reason", (object?)errorReason ?? DBNull.Value);
         command.Parameters.AddWithValue("$id", id);
-        command.Parameters.AddWithValue("$now", DateTimeOffset.UtcNow.ToUnixTimeSeconds());
+        var now = DateTimeOffset.UtcNow.ToUnixTimeSeconds(); command.Parameters.AddWithValue("$now", now);
         await command.ExecuteNonQueryAsync();
+        await transaction.CommitAsync();
     }
 
     public async Task UpdateMemoryCardAsync(string id, string prompt, string answer)
     {
         if (string.IsNullOrWhiteSpace(prompt)) throw new ArgumentException("题干不能为空");
-        await using var connection = await OpenAsync();
-        var command = connection.CreateCommand();
+        await using var connection = await OpenAsync(); await using var transaction = await connection.BeginTransactionAsync();
+        var command = connection.CreateCommand(); command.Transaction = (SqliteTransaction)transaction;
         command.CommandText = """
             UPDATE memory_card SET prompt_markdown = $prompt, answer_markdown = $answer
             WHERE study_item_id = $id;
@@ -573,8 +1179,9 @@ public sealed class AppRepository
         command.Parameters.AddWithValue("$prompt", prompt.Trim());
         command.Parameters.AddWithValue("$answer", answer.Trim());
         command.Parameters.AddWithValue("$id", id);
-        command.Parameters.AddWithValue("$now", DateTimeOffset.UtcNow.ToUnixTimeSeconds());
+        var now = DateTimeOffset.UtcNow.ToUnixTimeSeconds(); command.Parameters.AddWithValue("$now", now);
         await command.ExecuteNonQueryAsync();
+        await transaction.CommitAsync();
     }
 
     public async Task<ScheduleResult> ReviewAsync(
@@ -746,7 +1353,7 @@ public sealed class AppRepository
                 ("$reviewed", reviewedAt), ("$duration", Math.Max(0, durationSeconds)),
                 ("$quality", quality), ("$offset", offset), ("$beforeDue", row.DueAt),
                 ("$afterDue", result.Card.DueAt), ("$flags", result.DecisionFlags),
-                ("$snapshot", snapshot), ("$device", Environment.MachineName), ("$now", now));
+                ("$snapshot", snapshot), ("$device", deviceId), ("$now", now));
         }
         else
         {
@@ -760,7 +1367,7 @@ public sealed class AppRepository
                 ("$preference", preference), ("$feedback", appliedFeedback),
                 ("$reviewed", reviewedAt), ("$duration", Math.Max(0, durationSeconds)),
                 ("$beforeDue", row.DueAt), ("$afterDue", result.Card.DueAt),
-                ("$device", Environment.MachineName), ("$now", now));
+                ("$device", deviceId), ("$now", now));
         }
         if (row.Kind == "memory_card")
         {
@@ -821,12 +1428,65 @@ public sealed class AppRepository
                 ("$masteryBefore", masteryBefore), ("$streakBefore", streakBefore),
                 ("$scheduled", mathSchedule.ScheduledDays),
                 ("$consecutiveFailures", recentFailures));
+            await FreezeInkDraftAsync(connection, transaction, row.Id, attemptId, now);
         }
+        var deviceCounter = await NextDeviceCounterAsync(connection, transaction);
+        var operationId = Guid.NewGuid().ToString();
+        var changedFields = JsonSerializer.Serialize(new
+        {
+            studyItemId = row.Id,
+            algorithm,
+            feedback = appliedFeedback,
+            reviewedAt,
+            durationSeconds = Math.Max(0, durationSeconds),
+            errorReason,
+            hintRevealed,
+        });
+        await ExecuteAsync(connection, transaction, """
+            INSERT INTO review_action_v4 (
+              action_id, study_item_id, algorithm, feedback, reviewed_at,
+              duration_seconds, error_reason, hint_revealed, device_id,
+              device_counter, causal_cursor, source_generation, created_at)
+            VALUES ($action, $item, $algorithm, $feedback, $reviewed, $duration,
+              $reason, $hint, $device, $counter, 0, 4, $now);
+            INSERT INTO sync_outbox (
+              operation_id, device_id, device_counter, base_cursor, base_revision,
+              entity_type, entity_id, action, changed_fields_json, occurred_at)
+            VALUES ($operation, $device, $counter, 0, 0, 'reviewAction', $action,
+              'create', $fields, $now);
+            """, ("$action", eventId), ("$item", row.Id), ("$algorithm", algorithm),
+            ("$feedback", appliedFeedback), ("$reviewed", reviewedAt),
+            ("$duration", Math.Max(0, durationSeconds)),
+            ("$reason", errorReason is null ? DBNull.Value : errorReason),
+            ("$hint", hintRevealed ? 1 : 0), ("$device", deviceId),
+            ("$counter", deviceCounter), ("$now", now),
+            ("$operation", operationId), ("$fields", changedFields));
+        await ExecuteAsync(connection, transaction, """
+            UPDATE schedule_cache_v4 SET due_at = $due, replayed_action_count = $count,
+              dirty = 0, rebuilt_at = $now WHERE study_item_id = $item
+            """, ("$due", result.Card.DueAt), ("$count", row.Repetitions + 1),
+            ("$now", now), ("$item", row.Id));
         await transaction.CommitAsync();
         return result;
     }
 
     public string ResolveMediaPath(string relativePath) => Path.Combine(appDirectory, relativePath);
+
+    public async Task SaveInkDraftAsync(string studyItemId, byte[] gzipJson)
+    {
+        if (gzipJson.Length == 0 || gzipJson.Length > 25 * 1024 * 1024)
+            throw new ArgumentException("演算草稿大小无效");
+        await using var connection = await OpenAsync(); var command = connection.CreateCommand();
+        command.CommandText = """
+            INSERT INTO local_ink_draft (study_item_id, format_version, gzip_json, updated_at)
+            VALUES ($id, 1, $data, $now)
+            ON CONFLICT(study_item_id) DO UPDATE SET gzip_json = excluded.gzip_json,
+              updated_at = excluded.updated_at
+            """;
+        command.Parameters.AddWithValue("$id", studyItemId); command.Parameters.AddWithValue("$data", gzipJson);
+        command.Parameters.AddWithValue("$now", DateTimeOffset.UtcNow.ToUnixTimeSeconds());
+        await command.ExecuteNonQueryAsync();
+    }
 
     public async Task ExportBackupAsync(Stream output)
     {
@@ -838,7 +1498,32 @@ public sealed class AppRepository
         }
         var databasePath = Path.Combine(appDirectory, "reviewfault.db");
         if (!File.Exists(databasePath)) throw new InvalidOperationException("数据库文件不存在");
-        var files = new List<(string Path, string FilePath)> { ("database.sqlite", databasePath) };
+        var exportDatabase = Path.Combine(Path.GetTempPath(), "ReviewFault",
+            "backup-" + Guid.NewGuid() + ".sqlite");
+        Directory.CreateDirectory(Path.GetDirectoryName(exportDatabase)!);
+        File.Copy(databasePath, exportDatabase, true);
+        var exportConnectionString = new SqliteConnectionStringBuilder
+        {
+            DataSource = exportDatabase,
+            Mode = SqliteOpenMode.ReadWrite,
+            Pooling = false,
+        }.ToString();
+        await using (var sanitized = new SqliteConnection(exportConnectionString))
+        {
+            await sanitized.OpenAsync();
+            var clear = sanitized.CreateCommand();
+            clear.CommandText = """
+                DELETE FROM local_device;
+                DELETE FROM sync_cursor;
+                DELETE FROM sync_revision;
+                DELETE FROM sync_outbox;
+                DELETE FROM sync_conflict;
+                DELETE FROM local_ink_draft;
+                VACUUM;
+                """;
+            await clear.ExecuteNonQueryAsync();
+        }
+        var files = new List<(string Path, string FilePath)> { ("database.sqlite", exportDatabase) };
         var mediaDirectory = Path.Combine(appDirectory, "media");
         if (Directory.Exists(mediaDirectory))
         {
@@ -855,11 +1540,13 @@ public sealed class AppRepository
         var manifest = JsonSerializer.Serialize(new
         {
             format = "reviewfault-backup",
-            version = 3,
+            version = 4,
             appVersion = AppVersion,
-            schemaVersion = 3,
-            schedulerAbiVersion = 3,
+            schemaVersion = 4,
+            schedulerAbiVersion = 4,
             exportedAt = DateTimeOffset.UtcNow.ToUnixTimeSeconds(),
+            excludedTables = new[] { "local_device", "sync_cursor", "sync_revision",
+                "sync_outbox", "sync_conflict", "local_ink_draft" },
             files = manifestFiles,
         }, new JsonSerializerOptions { WriteIndented = true });
 
@@ -874,6 +1561,7 @@ public sealed class AppRepository
             await using var source = File.OpenRead(filePath);
             await source.CopyToAsync(destination);
         }
+        File.Delete(exportDatabase);
     }
 
     public async Task RestoreBackupAsync(Stream input)
@@ -923,7 +1611,8 @@ public sealed class AppRepository
             if (root.GetProperty("format").GetString() != "reviewfault-backup" ||
                 !((backupVersion == 1 && schemaVersion == 1 && abiVersion == 1) ||
                   (backupVersion == 2 && schemaVersion == 2 && abiVersion == 2) ||
-                  (backupVersion == 3 && schemaVersion == 3 && abiVersion == 3)))
+                  (backupVersion == 3 && schemaVersion == 3 && abiVersion == 3) ||
+                  (backupVersion == 4 && schemaVersion == 4 && abiVersion == 4)))
                 throw new InvalidDataException("不是受支持的 ReviewFault 备份");
             var listedFiles = new HashSet<string>(StringComparer.Ordinal);
             long listedBytes = 0;
@@ -976,10 +1665,17 @@ public sealed class AppRepository
                     await command.ExecuteNonQueryAsync();
                     restoredVersion = 3;
                 }
+                if (restoredVersion == 3)
+                {
+                    command.CommandText = await File.ReadAllTextAsync(Path.Combine(
+                        AppContext.BaseDirectory, "schema", "004_v0_4.sql"));
+                    await command.ExecuteNonQueryAsync();
+                    restoredVersion = 4;
+                }
                 command.CommandText = "PRAGMA integrity_check";
                 if ((string?)await command.ExecuteScalarAsync() != "ok")
                     throw new InvalidDataException("备份数据库完整性检查失败");
-                if (restoredVersion != 3)
+                if (restoredVersion != 4)
                     throw new InvalidDataException("备份数据库版本不兼容");
                 command.CommandText = "PRAGMA foreign_key_check";
                 await using var invalidReferences = await command.ExecuteReaderAsync();
@@ -987,6 +1683,8 @@ public sealed class AppRepository
                     throw new InvalidDataException("备份数据库存在无效引用");
             }
             ReplaceCurrentData(restoreRoot);
+            await using var restored = await OpenAsync();
+            await EnsureDeviceIdentityAsync(restored);
         }
         finally
         {
@@ -1074,6 +1772,115 @@ public sealed class AppRepository
         pragma.CommandText = "PRAGMA foreign_keys = ON";
         await pragma.ExecuteNonQueryAsync();
         return connection;
+    }
+
+    private async Task EnsureDeviceIdentityAsync(SqliteConnection connection)
+    {
+        var query = connection.CreateCommand();
+        query.CommandText = "SELECT device_id FROM local_device WHERE singleton = 1";
+        var existing = (string?)await query.ExecuteScalarAsync();
+        if (!string.IsNullOrWhiteSpace(existing))
+        {
+            deviceId = existing;
+            return;
+        }
+        if (string.IsNullOrWhiteSpace(deviceId)) deviceId = Guid.NewGuid().ToString();
+        var insert = connection.CreateCommand();
+        insert.CommandText = """
+            INSERT INTO local_device (singleton, device_id, next_counter, created_at)
+            VALUES (1, $device, 1, $now)
+            """;
+        insert.Parameters.AddWithValue("$device", deviceId);
+        insert.Parameters.AddWithValue("$now", DateTimeOffset.UtcNow.ToUnixTimeSeconds());
+        await insert.ExecuteNonQueryAsync();
+    }
+
+    private static async Task<long> NextDeviceCounterAsync(
+        SqliteConnection connection, System.Data.Common.DbTransaction transaction)
+    {
+        var command = connection.CreateCommand();
+        command.Transaction = (SqliteTransaction)transaction;
+        command.CommandText = """
+            UPDATE local_device SET next_counter = next_counter + 1 WHERE singleton = 1
+            RETURNING next_counter - 1
+            """;
+        return Convert.ToInt64(await command.ExecuteScalarAsync());
+    }
+
+    private static async Task EnqueueSyncAsync(
+        SqliteConnection connection, System.Data.Common.DbTransaction transaction,
+        string entityType, string entityId, string action, object fields, long occurredAt)
+    {
+        var metadata = connection.CreateCommand(); metadata.Transaction = (SqliteTransaction)transaction;
+        metadata.CommandText = """
+            SELECT d.device_id,
+              COALESCE((SELECT server_seq FROM sync_cursor WHERE workspace_id = d.workspace_id), 0),
+              COALESCE((SELECT revision FROM sync_revision WHERE entity_type = $type AND entity_id = $id), 0)
+            FROM local_device d WHERE singleton = 1
+            """;
+        metadata.Parameters.AddWithValue("$type", entityType); metadata.Parameters.AddWithValue("$id", entityId);
+        await using var reader = await metadata.ExecuteReaderAsync(); await reader.ReadAsync();
+        var localDevice = reader.GetString(0); var baseCursor = reader.GetInt64(1); var baseRevision = reader.GetInt64(2);
+        await reader.DisposeAsync();
+        var counter = await NextDeviceCounterAsync(connection, transaction);
+        await ExecuteAsync(connection, transaction, """
+            INSERT INTO sync_outbox (operation_id, device_id, device_counter, base_cursor,
+              base_revision, entity_type, entity_id, action, changed_fields_json, occurred_at)
+            VALUES ($operation, $device, $counter, $cursor, $revision, $type, $id,
+              $action, $fields, $occurred)
+            """, ("$operation", Guid.NewGuid().ToString()), ("$device", localDevice),
+            ("$counter", counter), ("$cursor", baseCursor), ("$revision", baseRevision),
+            ("$type", entityType), ("$id", entityId), ("$action", action),
+            ("$fields", JsonSerializer.Serialize(fields)), ("$occurred", occurredAt));
+    }
+
+    private async Task FreezeInkDraftAsync(
+        SqliteConnection connection, System.Data.Common.DbTransaction transaction,
+        string studyItemId, string attemptId, long now)
+    {
+        var query = connection.CreateCommand(); query.Transaction = (SqliteTransaction)transaction;
+        query.CommandText = "SELECT gzip_json FROM local_ink_draft WHERE study_item_id = $id";
+        query.Parameters.AddWithValue("$id", studyItemId);
+        var draft = await query.ExecuteScalarAsync() as byte[];
+        if (draft is null || draft.Length == 0) return;
+        var attemptQuery = connection.CreateCommand(); attemptQuery.Transaction = (SqliteTransaction)transaction;
+        attemptQuery.CommandText = """
+            SELECT started_at, finished_at, result, error_reason FROM attempt WHERE id = $id
+            """;
+        attemptQuery.Parameters.AddWithValue("$id", attemptId);
+        await using var attemptReader = await attemptQuery.ExecuteReaderAsync();
+        if (!await attemptReader.ReadAsync()) return;
+        var startedAt = attemptReader.GetInt64(0);
+        var finishedAt = attemptReader.IsDBNull(1) ? now : attemptReader.GetInt64(1);
+        var attemptResult = attemptReader.GetString(2);
+        var attemptErrorReason = attemptReader.IsDBNull(3) ? null : attemptReader.GetString(3);
+        await attemptReader.DisposeAsync();
+        var hash = Convert.ToHexString(SHA256.HashData(draft)).ToLowerInvariant();
+        var mediaDirectory = Path.Combine(appDirectory, "media"); Directory.CreateDirectory(mediaDirectory);
+        var path = Path.Combine(mediaDirectory, hash + ".reviewfault-ink.gz");
+        if (!File.Exists(path)) await File.WriteAllBytesAsync(path, draft);
+        var mediaId = NewId();
+        await ExecuteAsync(connection, transaction, """
+            INSERT OR IGNORE INTO media (id, sha256, mime_type, byte_count, relative_path, created_at)
+            VALUES ($media, $hash, 'application/gzip', $bytes, $path, $now)
+            """, ("$media", mediaId), ("$hash", hash), ("$bytes", draft.Length),
+            ("$path", Path.Combine("media", Path.GetFileName(path))), ("$now", now));
+        var lookup = connection.CreateCommand(); lookup.Transaction = (SqliteTransaction)transaction;
+        lookup.CommandText = "SELECT id FROM media WHERE sha256 = $hash"; lookup.Parameters.AddWithValue("$hash", hash);
+        mediaId = (string)(await lookup.ExecuteScalarAsync())!;
+        var artifactId = NewId();
+        await ExecuteAsync(connection, transaction, """
+            INSERT INTO attempt_artifact (id, attempt_id, artifact_type, media_id, page_count, created_at)
+            VALUES ($artifact, $attempt, 'reviewfault-ink-v1', $media, 1, $now);
+            DELETE FROM local_ink_draft WHERE study_item_id = $item;
+            """, ("$artifact", artifactId), ("$attempt", attemptId), ("$media", mediaId),
+            ("$now", now), ("$item", studyItemId));
+        await EnqueueSyncAsync(connection, transaction, "attemptArtifact", artifactId, "create", new {
+            attemptId, studyItemId, startedAt, finishedAt, result = attemptResult,
+            errorReason = attemptErrorReason, artifactType = "reviewfault-ink-v1",
+            mediaSha256 = hash, mediaMimeType = "application/gzip",
+            mediaByteCount = draft.Length, pageCount = 1,
+        }, now);
     }
 
     private static async Task<int> ExecuteAsync(

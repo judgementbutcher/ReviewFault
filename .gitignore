@@ -9,3 +9,4 @@ build/
 *.suo
 *.log
 .release-secrets/
+apps/harmony/entry/src/main/resources/rawfile/contracts/

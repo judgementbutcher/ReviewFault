@@ -18,7 +18,7 @@
 extern "C" {
 #endif
 
-#define RF_SCHEDULER_ABI_VERSION 3u
+#define RF_SCHEDULER_ABI_VERSION 4u
 
 typedef enum rf_rating {
   RF_RATING_AGAIN = 1,
@@ -327,6 +327,64 @@ RF_API int32_t review_math_v3(const rf_math_schedule_state_v2* state,
                               rf_math_review_result_v3* result,
                               char* error_buffer,
                               size_t error_buffer_size);
+
+/* ABI v4 canonicalizes immutable facts before replaying the frozen v3
+ * scheduler. Strings are borrowed for the duration of each call. */
+typedef struct rf_review_action_v4 {
+  uint32_t struct_size;
+  const char* action_id;
+  const char* device_id;
+  uint64_t device_counter;
+  uint64_t causal_cursor;
+  int32_t feedback;
+  int64_t reviewed_at;
+  uint32_t duration_seconds;
+  int32_t error_reason;
+  int32_t hint_revealed;
+} rf_review_action_v4;
+
+typedef struct rf_memory_replay_config_v4 {
+  uint32_t struct_size;
+  int32_t preset;
+  double calibration_improvement;
+} rf_memory_replay_config_v4;
+
+typedef struct rf_math_replay_config_v4 {
+  uint32_t struct_size;
+  int32_t intensity;
+} rf_math_replay_config_v4;
+
+typedef struct rf_memory_replay_result_v4 {
+  uint32_t struct_size;
+  rf_memory_schedule_state_v2 state;
+  uint64_t action_count;
+} rf_memory_replay_result_v4;
+
+typedef struct rf_math_replay_result_v4 {
+  uint32_t struct_size;
+  rf_math_schedule_state_v2 state;
+  uint64_t action_count;
+} rf_math_replay_result_v4;
+
+RF_API size_t rf_review_action_v4_size(void);
+RF_API size_t rf_memory_replay_result_v4_size(void);
+RF_API size_t rf_math_replay_result_v4_size(void);
+RF_API int32_t canonical_review_order_v4(
+    const rf_review_action_v4* actions, size_t action_count,
+    size_t* output_indices, size_t output_count,
+    char* error_buffer, size_t error_buffer_size);
+RF_API int32_t replay_memory_history_v4(
+    const rf_memory_schedule_state_v2* initial_state,
+    const rf_review_action_v4* actions, size_t action_count,
+    const rf_memory_replay_config_v4* config,
+    rf_memory_replay_result_v4* result,
+    char* error_buffer, size_t error_buffer_size);
+RF_API int32_t replay_math_history_v4(
+    const rf_math_schedule_state_v2* initial_state,
+    const rf_review_action_v4* actions, size_t action_count,
+    const rf_math_replay_config_v4* config,
+    rf_math_replay_result_v4* result,
+    char* error_buffer, size_t error_buffer_size);
 
 #ifdef __cplusplus
 }

@@ -66,9 +66,18 @@ object NativeScheduler {
         }
     }
 
-    private const val EXPECTED_ABI_VERSION = 3
+    private const val EXPECTED_ABI_VERSION = 4
 
     external fun nativeAbiVersion(): Int
+
+    external fun nativeCanonicalOrderV4(
+        actionIds: Array<String>,
+        deviceIds: Array<String>,
+        deviceCounters: LongArray,
+        causalCursors: LongArray,
+        feedback: IntArray,
+        reviewedAt: LongArray,
+    ): IntArray
 
     external fun nativeReview(
         state: Int,

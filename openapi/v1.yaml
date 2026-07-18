@@ -1,0 +1,197 @@
+openapi: 3.1.0
+info:
+  title: ReviewFault Sync API
+  version: 1.0.0
+  license: { name: Proprietary, identifier: LicenseRef-Proprietary }
+servers:
+  - url: https://sync.reviewfault.app/api/v1
+security:
+  - bearerAuth: []
+paths:
+  /auth/register:
+    post:
+      security: []
+      operationId: register
+      summary: Register with an invitation code
+      requestBody: { required: true, content: { application/json: { schema: { $ref: '#/components/schemas/RegisterRequest' } } } }
+      responses: { '202': { description: Verification email queued }, '400': { $ref: '#/components/responses/Problem' } }
+  /auth/verify-email:
+    post:
+      security: []
+      operationId: verifyEmail
+      summary: Verify an account email
+      requestBody: { required: true, content: { application/json: { schema: { $ref: '#/components/schemas/TokenRequest' } } } }
+      responses: { '204': { description: Verified }, '400': { $ref: '#/components/responses/Problem' } }
+  /auth/login:
+    post:
+      security: []
+      operationId: login
+      summary: Log in and bind a device
+      requestBody: { required: true, content: { application/json: { schema: { $ref: '#/components/schemas/LoginRequest' } } } }
+      responses: { '200': { description: 'Tokens, device and workspace', content: { application/json: { schema: { $ref: '#/components/schemas/TokenResponse' } } } }, '401': { $ref: '#/components/responses/Problem' } }
+  /auth/refresh:
+    post:
+      security: []
+      operationId: refresh
+      summary: Rotate a device refresh token
+      requestBody: { required: true, content: { application/json: { schema: { $ref: '#/components/schemas/RefreshRequest' } } } }
+      responses: { '200': { description: Rotated tokens, content: { application/json: { schema: { $ref: '#/components/schemas/TokenResponse' } } } }, '401': { $ref: '#/components/responses/Problem' } }
+  /auth/request-password-reset:
+    post:
+      security: []
+      operationId: requestPasswordReset
+      summary: Queue a password reset email
+      requestBody: { required: true, content: { application/json: { schema: { $ref: '#/components/schemas/PasswordResetRequest' } } } }
+      responses: { '202': { description: Always accepted }, '429': { $ref: '#/components/responses/Problem' } }
+  /auth/reset-password:
+    post:
+      security: []
+      operationId: resetPassword
+      summary: Reset a password with an emailed token
+      requestBody: { required: true, content: { application/json: { schema: { $ref: '#/components/schemas/ResetPasswordRequest' } } } }
+      responses: { '204': { description: Reset }, '400': { $ref: '#/components/responses/Problem' } }
+  /auth/logout:
+    post:
+      operationId: logout
+      summary: Revoke refresh tokens for the current device
+      responses: { '204': { description: Device token revoked }, '401': { $ref: '#/components/responses/Problem' } }
+  /sync/push:
+    post:
+      operationId: push
+      summary: Idempotently push local operations
+      requestBody: { required: true, content: { application/json: { schema: { type: object, required: [operations], properties: { operations: { type: array, maxItems: 500, items: { $ref: '#/components/schemas/SyncOperation' } } } } } } }
+      responses: { '200': { description: Idempotent acknowledgements }, '409': { $ref: '#/components/responses/Problem' } }
+  /sync/pull:
+    get:
+      operationId: pull
+      summary: Pull workspace operations after a cursor
+      parameters:
+        - { name: cursor, in: query, required: true, schema: { type: integer, minimum: 0 } }
+        - { name: limit, in: query, schema: { type: integer, minimum: 1, maximum: 500, default: 200 } }
+      responses: { '200': { description: Ordered operations and next cursor }, '401': { $ref: '#/components/responses/Problem' } }
+  /conflicts:
+    get:
+      operationId: listConflicts
+      summary: List unresolved field conflicts
+      responses: { '200': { description: Unresolved field conflicts }, '401': { $ref: '#/components/responses/Problem' } }
+  /conflicts/{conflictId}/resolve:
+    post:
+      operationId: resolveConflict
+      summary: Resolve a field conflict with a new operation
+      parameters: [ { name: conflictId, in: path, required: true, schema: { type: string, format: uuid } } ]
+      requestBody: { required: true, content: { application/json: { schema: { $ref: '#/components/schemas/ConflictResolution' } } } }
+      responses: { '204': { description: Resolution appended }, '404': { $ref: '#/components/responses/Problem' } }
+  /media/prepare:
+    post:
+      operationId: prepareMedia
+      summary: Query workspace media and prepare missing uploads
+      requestBody: { required: true, content: { application/json: { schema: { $ref: '#/components/schemas/MediaPrepareRequest' } } } }
+      responses: { '200': { description: Missing hashes and upload sessions }, '400': { $ref: '#/components/responses/Problem' } }
+  /media/{uploadId}/chunk/{index}:
+    put:
+      operationId: uploadMediaChunk
+      summary: Upload or retry an encrypted media chunk
+      parameters:
+        - { name: uploadId, in: path, required: true, schema: { type: string, format: uuid } }
+        - { name: index, in: path, required: true, schema: { type: integer, minimum: 0 } }
+      requestBody: { required: true, content: { application/octet-stream: { schema: { type: string, format: binary, maxLength: 5242880 } } } }
+      responses: { '204': { description: Chunk accepted }, '400': { $ref: '#/components/responses/Problem' } }
+  /media/{uploadId}/complete:
+    post:
+      operationId: completeMedia
+      summary: Verify and complete a media upload
+      parameters: [ { name: uploadId, in: path, required: true, schema: { type: string, format: uuid } } ]
+      responses: { '200': { description: Verified media object }, '400': { $ref: '#/components/responses/Problem' } }
+  /media/{sha256}:
+    get:
+      operationId: downloadMedia
+      summary: Download verified workspace media
+      parameters: [ { name: sha256, in: path, required: true, schema: { type: string, pattern: '^[a-f0-9]{64}$' } } ]
+      responses: { '200': { description: Encrypted workspace media }, '404': { $ref: '#/components/responses/Problem' } }
+  /devices:
+    get:
+      operationId: listDevices
+      summary: List account devices
+      responses: { '200': { description: Account devices }, '401': { $ref: '#/components/responses/Problem' } }
+  /devices/{deviceId}:
+    delete:
+      operationId: revokeDevice
+      summary: Revoke a device and its refresh tokens
+      parameters: [ { name: deviceId, in: path, required: true, schema: { type: string, format: uuid } } ]
+      responses: { '204': { description: Revoked }, '404': { $ref: '#/components/responses/Problem' } }
+  /account:
+    delete:
+      operationId: deleteAccount
+      summary: Delete the authenticated account
+      responses: { '202': { description: Deletion scheduled }, '401': { $ref: '#/components/responses/Problem' } }
+components:
+  securitySchemes:
+    bearerAuth: { type: http, scheme: bearer, bearerFormat: JWT }
+  responses:
+    Problem: { description: RFC 9457 problem details, content: { application/problem+json: { schema: { type: object } } } }
+  schemas:
+    RegisterRequest:
+      type: object
+      additionalProperties: false
+      required: [email, password, invitationCode]
+      properties: { email: { type: string, format: email }, password: { type: string, minLength: 12 }, invitationCode: { type: string, minLength: 8 } }
+    LoginRequest:
+      type: object
+      additionalProperties: false
+      required: [email, password, deviceId, deviceName]
+      properties: { email: { type: string, format: email }, password: { type: string }, deviceId: { type: string, format: uuid }, deviceName: { type: string, maxLength: 100 } }
+    TokenRequest:
+      type: object
+      required: [userId, token]
+      properties: { userId: { type: string, format: uuid }, token: { type: string } }
+    RefreshRequest:
+      type: object
+      required: [deviceId, refreshToken]
+      properties: { deviceId: { type: string, format: uuid }, refreshToken: { type: string } }
+    PasswordResetRequest:
+      type: object
+      additionalProperties: false
+      required: [email]
+      properties: { email: { type: string, format: email } }
+    ResetPasswordRequest:
+      type: object
+      additionalProperties: false
+      required: [userId, token, newPassword]
+      properties: { userId: { type: string, format: uuid }, token: { type: string }, newPassword: { type: string, minLength: 12 } }
+    ConflictResolution:
+      type: object
+      additionalProperties: false
+      required: [operationId, deviceCounter, baseCursor, value]
+      properties: { operationId: { type: string, format: uuid }, deviceCounter: { type: integer, minimum: 1 }, baseCursor: { type: integer, minimum: 0 }, value: {} }
+    MediaPrepareRequest:
+      type: object
+      additionalProperties: false
+      required: [objects]
+      properties:
+        objects:
+          type: array
+          maxItems: 100
+          items:
+            type: object
+            additionalProperties: false
+            required: [sha256, byteCount, mimeType]
+            properties: { sha256: { type: string, pattern: '^[a-f0-9]{64}$' }, byteCount: { type: integer, minimum: 1, maximum: 536870912 }, mimeType: { type: string, minLength: 1, maxLength: 100 } }
+    TokenResponse:
+      type: object
+      required: [accessToken, expiresIn, refreshToken, refreshExpiresIn, workspaceId, accountId]
+      properties: { accessToken: { type: string }, expiresIn: { const: 900 }, refreshToken: { type: string }, refreshExpiresIn: { const: 2592000 }, workspaceId: { type: string, format: uuid }, accountId: { type: string, format: uuid } }
+    SyncOperation:
+      type: object
+      additionalProperties: false
+      required: [operationId, deviceId, deviceCounter, baseCursor, baseRevision, entityType, entityId, action, changedFields, occurredAt]
+      properties:
+        operationId: { type: string, format: uuid }
+        deviceId: { type: string, format: uuid }
+        deviceCounter: { type: integer, minimum: 1 }
+        baseCursor: { type: integer, minimum: 0 }
+        baseRevision: { type: integer, minimum: 0 }
+        entityType: { type: string }
+        entityId: { type: string }
+        action: { enum: [create, update, delete, restore, add, remove] }
+        changedFields: { type: object }
+        occurredAt: { type: integer, minimum: 1 }

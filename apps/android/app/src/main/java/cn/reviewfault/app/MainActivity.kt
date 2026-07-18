@@ -1,11 +1,11 @@
 package cn.reviewfault.app
 
 import android.Manifest
-import android.content.Intent
 import android.content.pm.PackageManager
 import android.graphics.BitmapFactory
 import android.os.Build
 import android.os.Bundle
+import android.net.Uri
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.BackHandler
 import androidx.activity.compose.rememberLauncherForActivityResult
@@ -51,6 +51,7 @@ import androidx.compose.material.icons.filled.Add
 import androidx.compose.material.icons.filled.AddCircle
 import androidx.compose.material.icons.filled.Backup
 import androidx.compose.material.icons.filled.CheckCircle
+import androidx.compose.material.icons.filled.CloudSync
 import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.DarkMode
 import androidx.compose.material.icons.filled.DeleteOutline
@@ -78,6 +79,8 @@ import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.NavigationBar
 import androidx.compose.material3.NavigationBarItem
+import androidx.compose.material3.NavigationRail
+import androidx.compose.material3.NavigationRailItem
 import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Scaffold
@@ -87,6 +90,7 @@ import androidx.compose.material3.Surface
 import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
 import androidx.compose.material3.Typography
+import androidx.compose.material3.VerticalDivider
 import androidx.compose.material3.darkColorScheme
 import androidx.compose.material3.lightColorScheme
 import androidx.compose.runtime.Composable
@@ -105,14 +109,19 @@ import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.platform.LocalConfiguration
 import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.input.PasswordVisualTransformation
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.lifecycle.viewmodel.compose.viewModel
+import androidx.core.content.FileProvider
+import java.io.File
+import java.time.LocalDate
 import cn.reviewfault.app.data.LearningPreferences
 import cn.reviewfault.app.data.StudyRow
 import org.json.JSONArray
@@ -193,6 +202,7 @@ private fun ReviewFaultTheme(themeMode: Int, content: @Composable () -> Unit) {
 @Composable
 private fun ReviewFaultApp(state: AppUiState, model: AppViewModel) {
     val snackbar = remember { SnackbarHostState() }
+    val compact = LocalConfiguration.current.screenWidthDp < 600
     BackHandler(enabled = state.destination == AppDestination.Review) {
         model.finishReviewSession()
     }
@@ -208,13 +218,18 @@ private fun ReviewFaultApp(state: AppUiState, model: AppViewModel) {
         snackbarHost = { SnackbarHost(snackbar) },
         bottomBar = {
             AnimatedVisibility(
-                visible = state.destination != AppDestination.Review,
+                visible = compact && state.destination != AppDestination.Review,
                 enter = slideInVertically { it } + fadeIn(),
                 exit = slideOutVertically { it } + fadeOut(),
             ) { AppNavigation(state.destination, model::navigate) }
         },
     ) { padding ->
-        Box(Modifier.fillMaxSize().padding(padding), contentAlignment = Alignment.TopCenter) {
+        Row(Modifier.fillMaxSize().padding(padding)) {
+            if (!compact && state.destination != AppDestination.Review) {
+                AppNavigationRail(state.destination, model::navigate)
+                VerticalDivider(Modifier.fillMaxSize().width(1.dp))
+            }
+            Box(Modifier.fillMaxSize(), contentAlignment = Alignment.TopCenter) {
             AnimatedContent(
                 targetState = state.destination,
                 transitionSpec = { fadeIn() togetherWith fadeOut() },
@@ -228,6 +243,26 @@ private fun ReviewFaultApp(state: AppUiState, model: AppViewModel) {
                     AppDestination.Review -> ReviewScreen(state, model)
                 }
             }
+            }
+        }
+    }
+}
+
+@Composable
+private fun AppNavigationRail(selected: AppDestination, navigate: (AppDestination) -> Unit) {
+    NavigationRail(containerColor = MaterialTheme.colorScheme.surface) {
+        listOf(
+            Triple(AppDestination.Today, "今日", Icons.Default.Home),
+            Triple(AppDestination.Library, "题库", Icons.AutoMirrored.Filled.LibraryBooks),
+            Triple(AppDestination.Add, "添加", Icons.Default.AddCircle),
+            Triple(AppDestination.Settings, "设置", Icons.Default.Settings),
+        ).forEach { (destination, label, icon) ->
+            NavigationRailItem(
+                selected = selected == destination,
+                onClick = { navigate(destination) },
+                icon = { Icon(icon, contentDescription = label) },
+                label = { Text(label) },
+            )
         }
     }
 }
@@ -477,32 +512,47 @@ private fun EmptyLibrary(onAdd: () -> Unit) {
 @Composable
 private fun AddScreen(model: AppViewModel) = Page {
     val context = LocalContext.current
-    val launcher = rememberLauncherForActivityResult(ActivityResultContracts.StartActivityForResult()) {
-        model.navigate(AppDestination.Today)
+    var kind by rememberSaveable { mutableStateOf("choice") }
+    var prompt by rememberSaveable { mutableStateOf("") }
+    var answer by rememberSaveable { mutableStateOf("") }
+    var source by rememberSaveable { mutableStateOf("") }
+    var imageUris by rememberSaveable { mutableStateOf<List<String>>(emptyList()) }
+    var captureUri by rememberSaveable { mutableStateOf<String?>(null) }
+    val gallery = rememberLauncherForActivityResult(ActivityResultContracts.GetMultipleContents()) { uris ->
+        imageUris = uris.take(5).map(Uri::toString)
     }
-    fun launch(route: String) {
-        launcher.launch(Intent(context, LegacyMainActivity::class.java).putExtra(LegacyMainActivity.EXTRA_ROUTE, route))
+    val camera = rememberLauncherForActivityResult(ActivityResultContracts.TakePicture()) { saved ->
+        if (saved) captureUri?.let { imageUris = listOf(it) }
     }
     PageHeader("快速记录", "把卡住你的留下来", "先保存最必要的信息，细节可以在复习时补齐。")
-    AddChoiceCard(
-        icon = Icons.Default.Image,
-        title = "记录数学错题",
-        subtitle = "拍照或选择 1–5 张截图，约 30 秒完成",
-        accent = MaterialTheme.colorScheme.primaryContainer,
-        onClick = { launch(LegacyMainActivity.ROUTE_MATH) },
-    )
-    AddChoiceCard(
-        icon = Icons.Default.School,
-        title = "新建 408 记忆卡",
-        subtitle = "问答、填空、分层提示或枚举",
-        accent = MaterialTheme.colorScheme.secondaryContainer,
-        onClick = { launch(LegacyMainActivity.ROUTE_MEMORY) },
-    )
-    Surface(shape = RoundedCornerShape(16.dp), color = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = .55f)) {
-        Row(Modifier.padding(16.dp), verticalAlignment = Alignment.Top) {
-            Icon(Icons.Default.Psychology, contentDescription = null, tint = MaterialTheme.colorScheme.primary, modifier = Modifier.size(21.dp))
-            Spacer(Modifier.width(11.dp))
-            Text("记录不必一次做到完美。题面和问题先入库，答案、错因和提示可以在真正复习时补充。", style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
+    if (kind == "choice") {
+        AddChoiceCard(Icons.Default.Image, "记录数学错题", "拍照或选择 1–5 张截图，约 30 秒完成",
+            MaterialTheme.colorScheme.primaryContainer) { kind = "math" }
+        AddChoiceCard(Icons.Default.School, "新建 408 记忆卡", "问答卡；支持稍后继续编辑",
+            MaterialTheme.colorScheme.secondaryContainer) { kind = "memory" }
+    } else if (kind == "memory") {
+        OutlinedTextField(prompt, { prompt = it }, label = { Text("问题") }, modifier = Modifier.fillMaxWidth(), minLines = 3)
+        OutlinedTextField(answer, { answer = it }, label = { Text("答案") }, modifier = Modifier.fillMaxWidth(), minLines = 3)
+        Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
+            OutlinedButton({ kind = "choice" }, Modifier.height(48.dp)) { Text("返回") }
+            Button({ model.createMemoryCard("qa", prompt, answer) }, Modifier.height(48.dp),
+                enabled = prompt.isNotBlank() && answer.isNotBlank()) { Text("保存") }
+        }
+    } else {
+        OutlinedTextField(source, { source = it }, label = { Text("来源（可选）") }, modifier = Modifier.fillMaxWidth())
+        Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
+            OutlinedButton({ gallery.launch("image/*") }, Modifier.height(48.dp)) { Text("选择图片") }
+            OutlinedButton({
+                val file = File(context.cacheDir, "capture-${System.currentTimeMillis()}.jpg")
+                val uri = FileProvider.getUriForFile(context, "${context.packageName}.capture", file)
+                captureUri = uri.toString(); camera.launch(uri)
+            }, Modifier.height(48.dp)) { Text("拍照") }
+        }
+        Text("已选择 ${imageUris.size} 张", color = MaterialTheme.colorScheme.onSurfaceVariant)
+        Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
+            OutlinedButton({ kind = "choice" }, Modifier.height(48.dp)) { Text("返回") }
+            Button({ model.createMathProblem(imageUris.map(Uri::parse), source) }, Modifier.height(48.dp),
+                enabled = imageUris.isNotEmpty()) { Text("保存") }
         }
     }
 }
@@ -545,10 +595,17 @@ private fun SettingsScreen(state: AppUiState, model: AppViewModel) {
     var theme by remember(state.themeMode) { mutableIntStateOf(state.themeMode) }
     var reminder by remember(state.reminderEnabled) { mutableStateOf(state.reminderEnabled) }
     var time by remember(state.reminderTime) { mutableStateOf(state.reminderTime) }
+    var syncEndpoint by remember(state.syncEndpoint) { mutableStateOf(state.syncEndpoint) }
+    var accountEmail by rememberSaveable { mutableStateOf("") }
+    var accountPassword by rememberSaveable { mutableStateOf("") }
+    var invitationCode by rememberSaveable { mutableStateOf("") }
     val context = LocalContext.current
-    val backupLauncher = rememberLauncherForActivityResult(ActivityResultContracts.StartActivityForResult()) {
-        model.loadTrash(); model.refreshToday()
-    }
+    val exportBackup = rememberLauncherForActivityResult(
+        ActivityResultContracts.CreateDocument("application/zip"),
+    ) { uri -> uri?.let(model::exportBackup) }
+    val restoreBackup = rememberLauncherForActivityResult(
+        ActivityResultContracts.OpenDocument(),
+    ) { uri -> uri?.let(model::restoreBackup) }
     val permission = rememberLauncherForActivityResult(ActivityResultContracts.RequestPermission()) { granted ->
         if (!granted) reminder = false
     }
@@ -595,6 +652,64 @@ private fun SettingsScreen(state: AppUiState, model: AppViewModel) {
             }
         }
         item {
+            SettingsSection(
+                "账号与同步",
+                when {
+                    state.accountId == null -> "未登录，本地功能不受影响"
+                    state.syncInProgress -> "正在同步"
+                    else -> "待上传 ${state.syncPendingCount} 项"
+                },
+                Icons.Default.CloudSync,
+                initiallyExpanded = state.accountId == null,
+            ) {
+                OutlinedTextField(
+                    syncEndpoint, { syncEndpoint = it }, label = { Text("同步服务地址") },
+                    singleLine = true, modifier = Modifier.fillMaxWidth(),
+                )
+                if (state.accountId == null) {
+                    OutlinedTextField(
+                        accountEmail, { accountEmail = it }, label = { Text("邮箱") },
+                        singleLine = true, modifier = Modifier.fillMaxWidth(),
+                    )
+                    OutlinedTextField(
+                        accountPassword, { accountPassword = it }, label = { Text("密码（至少 12 位）") },
+                        singleLine = true, visualTransformation = PasswordVisualTransformation(),
+                        modifier = Modifier.fillMaxWidth(),
+                    )
+                    OutlinedTextField(
+                        invitationCode, { invitationCode = it }, label = { Text("邀请码（注册时需要）") },
+                        singleLine = true, modifier = Modifier.fillMaxWidth(),
+                    )
+                    Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                        OutlinedButton(
+                            onClick = { model.registerAccount(syncEndpoint, accountEmail, accountPassword, invitationCode) },
+                            enabled = !state.operationInProgress && accountEmail.isNotBlank() &&
+                                accountPassword.length >= 12 && invitationCode.length >= 8,
+                            modifier = Modifier.weight(1f).height(50.dp),
+                        ) { Text("注册") }
+                        Button(
+                            onClick = { model.loginAccount(syncEndpoint, accountEmail, accountPassword) },
+                            enabled = !state.operationInProgress && accountEmail.isNotBlank() && accountPassword.isNotBlank(),
+                            modifier = Modifier.weight(1f).height(50.dp),
+                        ) { Text("登录") }
+                    }
+                } else {
+                    Text("账号 ${state.accountId.take(8)}…", style = MaterialTheme.typography.bodyMedium)
+                    state.lastSyncedAt?.let { Text("上次同步 ${java.time.Instant.ofEpochSecond(it)}", color = MaterialTheme.colorScheme.onSurfaceVariant) }
+                    Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                        Button(
+                            onClick = model::syncNow, enabled = !state.syncInProgress,
+                            modifier = Modifier.weight(1f).height(50.dp),
+                        ) { Text(if (state.syncInProgress) "同步中" else "立即同步") }
+                        OutlinedButton(
+                            onClick = model::logoutAccount, enabled = !state.operationInProgress,
+                            modifier = Modifier.weight(1f).height(50.dp),
+                        ) { Text("退出") }
+                    }
+                }
+            }
+        }
+        item {
             SettingsSection("外观", "跟随系统、浅色或深色", Icons.Default.DarkMode) {
                 ChoiceRow("显示模式", listOf("0" to "跟随系统", "1" to "浅色", "2" to "深色"), theme.toString()) { theme = it.toInt() }
             }
@@ -621,13 +736,15 @@ private fun SettingsScreen(state: AppUiState, model: AppViewModel) {
         item {
             SettingsSection("数据与备份", "导出、恢复与回收站", Icons.Default.Backup) {
                 OutlinedButton(
-                    onClick = {
-                        backupLauncher.launch(Intent(context, LegacyMainActivity::class.java).putExtra(LegacyMainActivity.EXTRA_ROUTE, LegacyMainActivity.ROUTE_BACKUP))
-                    },
+                    onClick = { exportBackup.launch("ReviewFault-${LocalDate.now()}.reviewfault") },
                     modifier = Modifier.fillMaxWidth().height(50.dp),
                 ) {
-                    Icon(Icons.Default.Backup, null, Modifier.size(18.dp)); Spacer(Modifier.width(8.dp)); Text("备份与恢复")
+                    Icon(Icons.Default.Backup, null, Modifier.size(18.dp)); Spacer(Modifier.width(8.dp)); Text("导出备份")
                 }
+                OutlinedButton(
+                    onClick = { restoreBackup.launch(arrayOf("application/zip", "application/octet-stream")) },
+                    modifier = Modifier.fillMaxWidth().height(50.dp),
+                ) { Icon(Icons.Default.Restore, null, Modifier.size(18.dp)); Spacer(Modifier.width(8.dp)); Text("从备份恢复") }
                 if (state.trash.isEmpty()) {
                     Text("回收站为空", color = MaterialTheme.colorScheme.onSurfaceVariant, style = MaterialTheme.typography.bodyMedium)
                 } else {
@@ -750,9 +867,9 @@ private fun PreferenceSwitch(
 private fun ReviewScreen(state: AppUiState, model: AppViewModel) {
     val row = state.current ?: return
     val context = LocalContext.current
-    var reason by remember(row.id) { mutableStateOf("concept") }
+    var reason by rememberSaveable(row.id) { mutableStateOf("concept") }
     val hints = remember(row.id) { structuredItems(row) }
-    var shownHints by remember(row.id) { mutableIntStateOf(0) }
+    var shownHints by rememberSaveable(row.id) { mutableIntStateOf(0) }
     val bitmap = remember(row.id, row.mediaPath) {
         row.mediaPath?.let { BitmapFactory.decodeFile(java.io.File(context.filesDir, it).absolutePath) }
     }
@@ -800,6 +917,12 @@ private fun ReviewScreen(state: AppUiState, model: AppViewModel) {
                     modifier = Modifier.fillMaxWidth().clip(RoundedCornerShape(18.dp)).background(Color.White),
                     contentScale = ContentScale.FillWidth,
                 )
+            }
+        }
+        if (row.kind == "math_problem" && !state.answerRevealed) {
+            item {
+                Text("演算", style = MaterialTheme.typography.titleMedium)
+                InkPad(onDocumentChanged = { model.saveInkDraft(row.id, it) })
             }
         }
         if (!state.answerRevealed) {

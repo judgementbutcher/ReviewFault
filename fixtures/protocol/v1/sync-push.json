@@ -1,0 +1,16 @@
+{
+  "operations": [
+    {
+      "operationId": "018f47b0-7b2a-7000-8000-000000000001",
+      "deviceId": "018f47b0-7b2a-7000-8000-000000000002",
+      "deviceCounter": 42,
+      "baseCursor": 117,
+      "baseRevision": 3,
+      "entityType": "studyItem",
+      "entityId": "018f47b0-7b2a-7000-8000-000000000003",
+      "action": "update",
+      "changedFields": { "chapterId": null, "subject": "math" },
+      "occurredAt": 1800000000
+    }
+  ]
+}

@@ -29,7 +29,7 @@ cd apps/android
 需要仓库 secrets：`ANDROID_KEYSTORE_BASE64`、`ANDROID_KEYSTORE_PASSWORD`、
 `ANDROID_KEY_ALIAS`、`ANDROID_KEY_PASSWORD`、`ANDROID_CERT_SHA256`。其中第一个值是
 JKS/PKCS12 文件的 base64 内容，最后一个值是证书 SHA-256 指纹（小写且不含冒号）；
-私钥本身不得提交到仓库。配置完成后，`v0.3.2` tag 会构建并校验
+私钥本身不得提交到仓库。配置完成后，`v0.4.0` tag 会构建并校验
 `assembleRelease`，生成可覆盖升级的正式 APK。
 
 ## Windows
@@ -65,16 +65,26 @@ msbuild apps/windows/ReviewFault/ReviewFault.csproj -restore -t:Publish `
   -p:SelfContained=true -p:WindowsAppSDKSelfContained=true
 
 dotnet build apps/windows/ReviewFault.Installer/ReviewFault.Installer.wixproj `
-  -c Release -p:ProductVersion=0.3.2
+  -c Release -p:ProductVersion=0.4.0
 ```
 
 第一个命令同时携带 .NET 8 与 Windows App SDK 运行时，修复干净系统启动时要求另行安装
 Windows App Runtime 的问题；第二个命令使用该发布目录生成带安装路径选择、开始菜单快捷方式、
 升级与卸载支持的 x64 MSI。CI 会在 Windows runner 上静默安装、检查文件并卸载，之后才允许发布。
 
+## 同步服务
+
+```sh
+dotnet build services/sync/ReviewFault.Sync.csproj -c Release
+docker build -f services/sync/Dockerfile -t reviewfault-sync:0.4.0 .
+```
+
+部署时必须提供 PostgreSQL、S3 兼容对象存储、32 字节 workspace 主密钥、JWT 密钥和 SMTP；
+完整 Compose 拓扑见 `deploy/compose.yaml`。
+
 ## 跨端门禁
 
-- 两端运行 `fixtures/scheduler_v1.tsv` 后结果必须逐字段一致；
+- 三端运行冻结调度 fixtures 后结果必须逐字段一致；
 - Android 导出的备份应能在 Windows 恢复，Windows 导出的备份也应能在 Android 恢复；
 - 恢复损坏哈希、非法路径、错误 schema 版本时必须保留原数据；
-- 改动 schema、调度公式或 C ABI 时必须分别提升对应版本，不能静默复用版本 1。
+- 改动 schema、调度公式或 C ABI 时必须分别提升对应版本，不能静默复用旧版本。

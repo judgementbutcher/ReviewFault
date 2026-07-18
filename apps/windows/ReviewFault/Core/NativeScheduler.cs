@@ -172,6 +172,19 @@ internal struct MathResultV3Native
     public uint StructSize; public MathStateV2Native State; public MathEventV3Native Event;
 }
 
+[StructLayout(LayoutKind.Sequential)]
+internal struct ReviewActionV4Native
+{
+    public uint StructSize;
+    [MarshalAs(UnmanagedType.LPUTF8Str)] public string ActionId;
+    [MarshalAs(UnmanagedType.LPUTF8Str)] public string DeviceId;
+    public ulong DeviceCounter, CausalCursor;
+    public int Feedback;
+    public long ReviewedAt;
+    public uint DurationSeconds;
+    public int ErrorReason, HintRevealed;
+}
+
 public sealed record ScheduleCard(
     CardState State,
     double Difficulty,
@@ -198,11 +211,14 @@ public sealed record MathScheduleResult(
     uint MasteryLevel, uint FluentStreak, long DueAt, long LastReviewedAt,
     uint Repetitions, double ScheduledDays, int AppliedFeedback,
     uint AlgorithmVersion = 2, uint ParameterVersion = 1, uint DecisionFlags = 0);
+public sealed record ReplayAction(
+    string ActionId, string DeviceId, ulong DeviceCounter, ulong CausalCursor,
+    int Feedback, long ReviewedAt);
 
 public static class NativeScheduler
 {
     private const string Library = "reviewfault_core";
-    private const uint ExpectedAbiVersion = 3;
+    private const uint ExpectedAbiVersion = 4;
 
     [DllImport(Library, CallingConvention = CallingConvention.Cdecl)]
     private static extern uint rf_scheduler_abi_version();
@@ -234,6 +250,13 @@ public static class NativeScheduler
     private static extern nuint rf_memory_review_result_v3_size();
     [DllImport(Library, CallingConvention = CallingConvention.Cdecl)]
     private static extern nuint rf_math_review_result_v3_size();
+    [DllImport(Library, CallingConvention = CallingConvention.Cdecl)]
+    private static extern nuint rf_review_action_v4_size();
+    [DllImport(Library, CallingConvention = CallingConvention.Cdecl, CharSet = CharSet.Ansi)]
+    private static extern int canonical_review_order_v4(
+        [In] ReviewActionV4Native[] actions, nuint actionCount,
+        [Out] nuint[] outputIndices, nuint outputCount,
+        StringBuilder errorBuffer, nuint errorBufferSize);
     [DllImport(Library, CallingConvention = CallingConvention.Cdecl, CharSet = CharSet.Ansi)]
     private static extern int review_memory_v2(in MemoryStateV2Native state,
         in MemoryInputV2Native input, ref MemoryResultV2Native result,
@@ -276,8 +299,25 @@ public static class NativeScheduler
             rf_math_review_result_v2_size() != (nuint)Marshal.SizeOf<MathResultV2Native>())
             throw new InvalidOperationException("调度器 ABI v2 结构不匹配，请重新安装应用。");
         if (rf_memory_review_result_v3_size() != (nuint)Marshal.SizeOf<MemoryResultV3Native>() ||
-            rf_math_review_result_v3_size() != (nuint)Marshal.SizeOf<MathResultV3Native>())
-            throw new InvalidOperationException("调度器 ABI v3 结构不匹配，请重新安装应用。");
+            rf_math_review_result_v3_size() != (nuint)Marshal.SizeOf<MathResultV3Native>() ||
+            rf_review_action_v4_size() != (nuint)Marshal.SizeOf<ReviewActionV4Native>())
+            throw new InvalidOperationException("调度器 ABI v4 结构不匹配，请重新安装应用。");
+    }
+
+    public static int[] CanonicalOrderV4(IReadOnlyList<ReplayAction> actions)
+    {
+        ValidateAbi();
+        var native = actions.Select(action => new ReviewActionV4Native {
+            StructSize = (uint)Marshal.SizeOf<ReviewActionV4Native>(), ActionId = action.ActionId,
+            DeviceId = action.DeviceId, DeviceCounter = action.DeviceCounter,
+            CausalCursor = action.CausalCursor, Feedback = action.Feedback,
+            ReviewedAt = action.ReviewedAt,
+        }).ToArray();
+        var order = new nuint[native.Length]; var error = new StringBuilder(256);
+        var status = canonical_review_order_v4(native, (nuint)native.Length, order,
+            (nuint)order.Length, error, (nuint)error.Capacity);
+        if (status != 0) throw new ArgumentException(error.ToString());
+        return order.Select(index => checked((int)index)).ToArray();
     }
 
     public static ScheduleCard NewCard()

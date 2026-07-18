@@ -9,6 +9,7 @@
     <PackageReference Include="Microsoft.Data.Sqlite" Version="8.0.11" />
     <Compile Include="..\ReviewFault\Core\NativeScheduler.cs" Link="Core\NativeScheduler.cs" />
     <Compile Include="..\ReviewFault\Data\AppRepository.cs" Link="Data\AppRepository.cs" />
+    <Compile Include="..\ReviewFault\Services\SyncClient.cs" Link="Services\SyncClient.cs" />
     <Content Include="..\..\..\schema\migrations\001_initial.sql"
              Link="schema\001_initial.sql"
              CopyToOutputDirectory="PreserveNewest" />
@@ -17,6 +18,9 @@
              CopyToOutputDirectory="PreserveNewest" />
     <Content Include="..\..\..\schema\migrations\003_v0_3.sql"
              Link="schema\003_v0_3.sql"
+             CopyToOutputDirectory="PreserveNewest" />
+    <Content Include="..\..\..\schema\migrations\004_v0_4.sql"
+             Link="schema\004_v0_4.sql"
              CopyToOutputDirectory="PreserveNewest" />
   </ItemGroup>
 </Project>

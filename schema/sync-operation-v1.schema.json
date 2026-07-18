@@ -1,0 +1,20 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://reviewfault.app/schema/sync-operation-v1.schema.json",
+  "title": "ReviewFault sync operation v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["operationId", "deviceId", "deviceCounter", "baseCursor", "baseRevision", "entityType", "entityId", "action", "changedFields", "occurredAt"],
+  "properties": {
+    "operationId": { "type": "string", "format": "uuid" },
+    "deviceId": { "type": "string", "format": "uuid" },
+    "deviceCounter": { "type": "integer", "minimum": 1 },
+    "baseCursor": { "type": "integer", "minimum": 0 },
+    "baseRevision": { "type": "integer", "minimum": 0 },
+    "entityType": { "type": "string", "enum": ["chapter", "studyItem", "mathProblem", "memoryCard", "tag", "relation", "reviewAction", "attempt", "attemptArtifact", "learningPreferences"] },
+    "entityId": { "type": "string", "minLength": 1, "maxLength": 200 },
+    "action": { "type": "string", "enum": ["create", "update", "delete", "restore", "add", "remove"] },
+    "changedFields": { "type": "object" },
+    "occurredAt": { "type": "integer", "minimum": 1 }
+  }
+}

@@ -1,0 +1,518 @@
+import { relationalStore } from '@kit.ArkData';
+import { UIAbilityContext } from '@kit.AbilityKit';
+import { util } from '@kit.ArkTS';
+import reviewfault from 'libreviewfault.so';
+
+const DATABASE_NAME = 'reviewfault.db';
+const SCHEMA_VERSION = 4;
+
+export interface DashboardSummary {
+  overdue: number; dueToday: number; newItems: number;
+}
+export interface StudyItem {
+  id: string; kind: string; subject: string; state: number; difficulty: number;
+  stabilityDays: number; dueAt: number; lastReviewedAt: number; repetitions: number;
+  lapses: number; masteryLevel: number; fluentStreak: number; prompt: string; answer: string;
+}
+export interface SyncIdentity {
+  deviceId: string; workspaceId: string; cursor: number; pendingCount: number;
+}
+export interface LocalSyncOperation {
+  operationId: string; deviceId: string; deviceCounter: number; baseCursor: number;
+  baseRevision: number; entityType: string; entityId: string; action: string;
+  changedFields: Record<string, Object>; occurredAt: number;
+}
+export interface PulledOperation {
+  operationId: string; serverSeq: number; deviceId: string; deviceCounter: number;
+  entityType: string; entityId: string; action: string;
+  changedFields: Record<string, Object>; occurredAt: number;
+}
+interface ReviewFact {
+  actionId: string; deviceId: string; deviceCounter: number; causalCursor: number;
+  feedback: number; reviewedAt: number; durationSeconds: number; errorReason: string; hintRevealed: boolean;
+}
+
+export class LocalDatabase {
+  private store?: relationalStore.RdbStore;
+
+  constructor(private readonly context: UIAbilityContext) {}
+
+  async open(): Promise<relationalStore.RdbStore> {
+    if (this.store) return this.store;
+    const store = await relationalStore.getRdbStore(this.context, {
+      name: DATABASE_NAME, securityLevel: relationalStore.SecurityLevel.S1,
+    });
+    await store.executeSql('PRAGMA foreign_keys = ON');
+    const version = await this.version(store);
+    if (version > SCHEMA_VERSION) throw new Error(`Unsupported database version ${version}`);
+    for (let next = version + 1; next <= SCHEMA_VERSION; next++) await this.applyMigration(store, next);
+    const existing = await store.querySql('SELECT COUNT(*) FROM local_device WHERE singleton = 1');
+    let hasIdentity = false;
+    try { hasIdentity = existing.goToFirstRow() && existing.getLong(0) > 0; } finally { existing.close(); }
+    if (!hasIdentity) await store.executeSql(
+      'INSERT INTO local_device (singleton, device_id, next_counter, created_at) VALUES (1, ?, 1, ?)',
+      [util.generateRandomUUID(true), this.now()],
+    );
+    this.store = store; return store;
+  }
+
+  async dashboard(): Promise<DashboardSummary> {
+    const store = await this.open(); const now = this.now();
+    const start = new Date(); start.setHours(0, 0, 0, 0); const dayStart = Math.floor(start.getTime() / 1000);
+    const result = await store.querySql(`SELECT
+      COALESCE(SUM(CASE WHEN i.scheduler_state <> 0 AND i.due_at < ? THEN 1 ELSE 0 END), 0),
+      COALESCE(SUM(CASE WHEN i.scheduler_state <> 0 AND i.due_at BETWEEN ? AND ? THEN 1 ELSE 0 END), 0),
+      COALESCE(SUM(CASE WHEN i.scheduler_state = 0 THEN 1 ELSE 0 END), 0)
+      FROM study_item i WHERE i.deleted_at IS NULL`,
+      [dayStart, dayStart, now]);
+    try {
+      if (!result.goToFirstRow()) return { overdue: 0, dueToday: 0, newItems: 0 };
+      return { overdue: result.getLong(0), dueToday: result.getLong(1), newItems: result.getLong(2) };
+    } finally { result.close(); }
+  }
+
+  async items(query: string = ''): Promise<StudyItem[]> {
+    const store = await this.open(); const pattern = `%${query.trim()}%`;
+    const result = await store.querySql(`SELECT i.id, i.kind, i.subject, i.scheduler_state,
+      i.difficulty, i.stability_days, i.due_at, i.last_reviewed_at, i.repetitions, i.lapses,
+      COALESCE(ms.mastery_level, 0), COALESCE(ms.fluent_streak, 0),
+      COALESCE(m.prompt_markdown, p.prompt_markdown, ''),
+      COALESCE(m.answer_markdown, p.solution_markdown, '')
+      FROM study_item i LEFT JOIN math_schedule_state ms ON ms.study_item_id = i.id
+      LEFT JOIN memory_card m ON m.study_item_id = i.id LEFT JOIN math_problem p ON p.study_item_id = i.id
+      WHERE i.deleted_at IS NULL AND (m.prompt_markdown LIKE ? OR m.answer_markdown LIKE ? OR p.source_name LIKE ?)
+      ORDER BY i.updated_at DESC LIMIT 200`, [pattern, pattern, pattern]);
+    const values: StudyItem[] = [];
+    try { if (result.goToFirstRow()) do {
+      values.push({ id: result.getString(0), kind: result.getString(1), subject: result.getString(2),
+        state: result.getLong(3), difficulty: result.getDouble(4), stabilityDays: result.getDouble(5),
+        dueAt: result.getLong(6), lastReviewedAt: result.getLong(7), repetitions: result.getLong(8),
+        lapses: result.getLong(9), masteryLevel: result.getLong(10), fluentStreak: result.getLong(11),
+        prompt: result.getString(12), answer: result.getString(13) });
+    } while (result.goToNextRow()); } finally { result.close(); }
+    return values;
+  }
+
+  async nextForReview(): Promise<StudyItem | undefined> {
+    const values = await this.items(); const now = this.now();
+    return values.filter(item => item.state === 0 || item.dueAt <= now)
+      .sort((left, right) => left.state === right.state ? left.dueAt - right.dueAt : right.state - left.state)[0];
+  }
+
+  async createMemoryCard(prompt: string, answer: string): Promise<string> {
+    if (prompt.trim().length === 0 || answer.trim().length === 0) throw new Error('题干和答案不能为空');
+    const store = await this.open(); const id = util.generateRandomUUID(true); const now = this.now();
+    store.beginTransaction();
+    try {
+      await store.executeSql(`INSERT INTO study_item (id, kind, subject, created_at, updated_at)
+        VALUES (?, 'memory_card', 'operating_systems', ?, ?)`, [id, now, now]);
+      await store.executeSql(`INSERT INTO memory_card (study_item_id, template_type, prompt_markdown,
+        answer_markdown, hints_json, answer_points_json) VALUES (?, 'qa', ?, ?, '[]', '[]')`,
+        [id, prompt.trim(), answer.trim()]);
+      store.commit(); return id;
+    } catch (error) { store.rollBack(); throw error; }
+  }
+
+  async review(item: StudyItem, feedback: number, durationSeconds: number): Promise<number> {
+    const store = await this.open(); const reviewedAt = this.now();
+    let dueAt = 0; let appliedFeedback = feedback; let nextState = item.state;
+    let difficulty = item.difficulty; let stability = item.stabilityDays;
+    let mastery = item.masteryLevel; let streak = item.fluentStreak;
+    let repetitions = item.repetitions; let lapses = item.lapses; let parameterVersion = 2;
+    if (item.kind === 'memory_card') {
+      const value = reviewfault.reviewMemoryV3({ state: item.state, difficulty: item.difficulty,
+        stabilityDays: item.stabilityDays, dueAt: item.dueAt, lastReviewedAt: item.lastReviewedAt,
+        repetitions: item.repetitions, lapses: item.lapses, rating: feedback, preset: 1,
+        reviewedAt, historyCount: item.repetitions, calibrationImprovement: 0, consecutiveLapses: 0 });
+      dueAt = value.dueAt; nextState = value.state; difficulty = value.difficulty; stability = value.stabilityDays;
+      repetitions = value.repetitions; lapses = value.lapses; parameterVersion = value.parameterVersion;
+    } else {
+      const value = reviewfault.reviewMathV3({ masteryLevel: item.masteryLevel, fluentStreak: item.fluentStreak,
+        dueAt: item.dueAt, lastReviewedAt: item.lastReviewedAt, repetitions: item.repetitions,
+        feedback, errorReason: 0, hintRevealed: 0, intensity: 1, reviewedAt,
+        durationSeconds, durationQuality: durationSeconds < 5 ? 2 : 1, consecutiveFailures: 0 });
+      dueAt = value.dueAt; appliedFeedback = value.appliedFeedback; mastery = value.masteryLevel;
+      streak = value.fluentStreak; repetitions = value.repetitions; stability = value.scheduledDays;
+      difficulty = mastery + 1; lapses += appliedFeedback <= 1 ? 1 : 0;
+      parameterVersion = value.parameterVersion; nextState = value.repetitions === 0 ? 0 : 2;
+    }
+    store.beginTransaction();
+    try {
+      await store.executeSql(`UPDATE study_item SET scheduler_state = ?, difficulty = ?,
+        stability_days = ?, due_at = ?, last_reviewed_at = ?, repetitions = ?, lapses = ?,
+        updated_at = ? WHERE id = ?`,
+        [nextState, difficulty, stability, dueAt, reviewedAt, repetitions, lapses, reviewedAt, item.id]);
+      await store.executeSql(`UPDATE schedule_state_v2 SET due_at = ?, last_reviewed_at = ?,
+        repetitions = ?, needs_history_replay = 0, active_algorithm_version = 3,
+        active_parameter_version = ?, updated_at = ? WHERE study_item_id = ?`,
+        [dueAt, reviewedAt, repetitions, parameterVersion, reviewedAt, item.id]);
+      if (item.kind === 'memory_card') await store.executeSql(`UPDATE memory_schedule_state SET
+        state = ?, difficulty = ?, stability_days = ?, lapses = ? WHERE study_item_id = ?`,
+        [nextState, difficulty, stability, lapses, item.id]);
+      else await store.executeSql(`UPDATE math_schedule_state SET mastery_level = ?, fluent_streak = ?
+        WHERE study_item_id = ?`, [mastery, streak, item.id]);
+      const actionId = util.generateRandomUUID(true); const identity = await this.counter(store);
+      const algorithm = item.kind === 'memory_card' ? 'memory_fsrs_6' : 'math_mastery_ladder';
+      await store.executeSql(`INSERT INTO review_action_v4 (action_id, study_item_id, algorithm, feedback,
+        reviewed_at, duration_seconds, hint_revealed, device_id, device_counter, causal_cursor,
+        source_generation, created_at) VALUES (?, ?, ?, ?, ?, ?, 0, ?, ?, ?, 4, ?)`,
+        [actionId, item.id, algorithm, appliedFeedback, reviewedAt, durationSeconds,
+          identity.deviceId, identity.counter, identity.cursor, reviewedAt]);
+      await this.insertOutbox(store, identity, 'reviewAction', actionId, 'create', { studyItemId: item.id,
+        algorithm, feedback: appliedFeedback, reviewedAt, durationSeconds, hintRevealed: false }, reviewedAt);
+      await store.executeSql(`UPDATE schedule_cache_v4 SET due_at = ?, replayed_action_count = ?,
+        dirty = 0, rebuilt_at = ? WHERE study_item_id = ?`, [dueAt, item.repetitions + 1, reviewedAt, item.id]);
+      store.commit(); return dueAt;
+    } catch (error) { store.rollBack(); throw error; }
+  }
+
+  async bindAccount(accountId: string, workspaceId: string): Promise<void> {
+    const store = await this.open(); const current = await this.syncIdentity();
+    if (current.workspaceId.length > 0 && current.workspaceId !== workspaceId)
+      throw new Error('此本地数据目录已绑定其他账号，请先导出备份');
+    await store.executeSql('UPDATE local_device SET account_id = ?, workspace_id = ? WHERE singleton = 1',
+      [accountId, workspaceId]);
+    await store.executeSql(`INSERT OR IGNORE INTO sync_cursor (workspace_id, server_seq, updated_at)
+      VALUES (?, 0, ?)`, [workspaceId, this.now()]);
+  }
+
+  async syncIdentity(): Promise<SyncIdentity> {
+    const store = await this.open(); const result = await store.querySql(`SELECT d.device_id,
+      COALESCE(d.workspace_id, ''), COALESCE((SELECT server_seq FROM sync_cursor
+      WHERE workspace_id = d.workspace_id), 0), (SELECT COUNT(*) FROM sync_outbox)
+      FROM local_device d WHERE singleton = 1`);
+    try { result.goToFirstRow(); return { deviceId: result.getString(0), workspaceId: result.getString(1),
+      cursor: result.getLong(2), pendingCount: result.getLong(3) }; } finally { result.close(); }
+  }
+
+  async pendingOperations(): Promise<LocalSyncOperation[]> {
+    const store = await this.open(); const result = await store.querySql(`SELECT operation_id, device_id,
+      device_counter, base_cursor, base_revision, entity_type, entity_id, action,
+      changed_fields_json, occurred_at FROM sync_outbox ORDER BY device_counter LIMIT 200`);
+    const values: LocalSyncOperation[] = [];
+    try { if (result.goToFirstRow()) do { values.push({ operationId: result.getString(0),
+      deviceId: result.getString(1), deviceCounter: result.getLong(2), baseCursor: result.getLong(3),
+      baseRevision: result.getLong(4), entityType: result.getString(5), entityId: result.getString(6),
+      action: result.getString(7), changedFields: JSON.parse(result.getString(8)) as Record<string, Object>,
+      occurredAt: result.getLong(9) }); } while (result.goToNextRow()); } finally { result.close(); }
+    return values;
+  }
+
+  async acknowledge(operationIds: string[]): Promise<void> {
+    const store = await this.open(); store.beginTransaction();
+    try { for (const id of operationIds) await store.executeSql('DELETE FROM sync_outbox WHERE operation_id = ?', [id]);
+      store.commit(); } catch (error) { store.rollBack(); throw error; }
+  }
+
+  async applyPulled(workspaceId: string, operations: PulledOperation[], cursor: number): Promise<void> {
+    const store = await this.open(); store.beginTransaction();
+    try {
+      for (const operation of operations.sort((left, right) => left.serverSeq - right.serverSeq)) {
+        const counterQuery = await store.querySql('SELECT next_counter FROM local_device WHERE singleton = 1');
+        let remoteApplyCounterStart = 0;
+        try { counterQuery.goToFirstRow(); remoteApplyCounterStart = counterQuery.getLong(0); }
+        finally { counterQuery.close(); }
+        if (operation.entityType === 'studyItem') await this.applyStudyItem(store, operation);
+        else if (operation.entityType === 'memoryCard') await this.applyMemoryCard(store, operation);
+        else if (operation.entityType === 'mathProblem') await this.applyMathProblem(store, operation);
+        else if (operation.entityType === 'tag') await this.applyTag(store, operation);
+        else if (operation.entityType === 'relation') await this.applyRelation(store, operation);
+        else if (operation.entityType === 'learningPreferences') await this.applyLearningPreferences(store, operation);
+        else if (operation.entityType === 'reviewAction') await this.applyReviewAction(store, operation);
+        await store.executeSql(`DELETE FROM sync_outbox WHERE device_id =
+          (SELECT device_id FROM local_device WHERE singleton = 1) AND device_counter >= ?`,
+          [remoteApplyCounterStart]);
+        await store.executeSql(`DELETE FROM relation_operation WHERE device_id =
+          (SELECT device_id FROM local_device WHERE singleton = 1) AND device_counter >= ?`,
+          [remoteApplyCounterStart]);
+        await store.executeSql(`INSERT INTO sync_revision (entity_type, entity_id, revision, server_seq, deleted)
+          VALUES (?, ?, 1, ?, ?) ON CONFLICT(entity_type, entity_id) DO UPDATE SET
+          revision = revision + 1, server_seq = MAX(server_seq, excluded.server_seq), deleted = excluded.deleted`,
+          [operation.entityType, operation.entityId, operation.serverSeq, operation.action === 'delete' ? 1 : 0]);
+      }
+      await store.executeSql(`INSERT INTO sync_cursor (workspace_id, server_seq, updated_at) VALUES (?, ?, ?)
+        ON CONFLICT(workspace_id) DO UPDATE SET server_seq = MAX(server_seq, excluded.server_seq),
+        updated_at = excluded.updated_at`, [workspaceId, cursor, this.now()]);
+      store.commit();
+    } catch (error) { store.rollBack(); throw error; }
+    await this.rebuildDirtySchedules();
+  }
+
+  private async applyStudyItem(store: relationalStore.RdbStore, operation: PulledOperation): Promise<void> {
+    const fields = operation.changedFields; const check = await store.querySql('SELECT COUNT(*) FROM study_item WHERE id = ?', [operation.entityId]);
+    let exists = false; try { exists = check.goToFirstRow() && check.getLong(0) > 0; } finally { check.close(); }
+    if (!exists) {
+      const kind = String(fields['kind'] ?? 'memory_card'); const now = Number(fields['updatedAt'] ?? operation.occurredAt);
+      await store.executeSql(`INSERT INTO study_item (id, kind, subject, created_at, updated_at, deleted_at)
+        VALUES (?, ?, ?, ?, ?, ?)`, [operation.entityId, kind, String(fields['subject'] ?? 'operating_systems'),
+        Number(fields['createdAt'] ?? operation.occurredAt), now, operation.action === 'delete' ? operation.occurredAt : null]);
+      if (kind === 'memory_card') await store.executeSql(`INSERT INTO memory_card (study_item_id,
+        template_type, prompt_markdown, answer_markdown, hints_json, answer_points_json)
+        VALUES (?, ?, ?, ?, ?, ?)`, [operation.entityId, String(fields['templateType'] ?? 'qa'),
+        String(fields['prompt'] ?? ''), String(fields['answer'] ?? ''), JSON.stringify(fields['hints'] ?? []),
+        JSON.stringify(fields['answerPoints'] ?? [])]);
+      else await store.executeSql(`INSERT INTO math_problem (study_item_id, source_name, solution_markdown,
+        wrong_step_markdown, key_hint_markdown) VALUES (?, ?, ?, ?, ?)`, [operation.entityId,
+        String(fields['sourceName'] ?? ''), String(fields['solution'] ?? ''), String(fields['wrongStep'] ?? ''),
+        String(fields['keyHint'] ?? '')]);
+    } else {
+      if (fields['subject'] !== undefined) await store.executeSql(
+        'UPDATE study_item SET subject = ?, updated_at = ? WHERE id = ?',
+        [String(fields['subject']), Number(fields['updatedAt'] ?? operation.occurredAt), operation.entityId]);
+      if (operation.action === 'delete' || operation.action === 'restore') await store.executeSql(
+        'UPDATE study_item SET deleted_at = ?, updated_at = ? WHERE id = ?',
+        [operation.action === 'delete' ? operation.occurredAt : null, operation.occurredAt, operation.entityId]);
+      const kindQuery = await store.querySql('SELECT kind FROM study_item WHERE id = ?', [operation.entityId]);
+      let kind = 'memory_card';
+      try { kindQuery.goToFirstRow(); kind = kindQuery.getString(0); } finally { kindQuery.close(); }
+      if (kind === 'memory_card') {
+        if (fields['templateType'] !== undefined) await store.executeSql(
+          'UPDATE memory_card SET template_type = ? WHERE study_item_id = ?',
+          [String(fields['templateType']), operation.entityId]);
+        if (fields['prompt'] !== undefined) await store.executeSql(
+          'UPDATE memory_card SET prompt_markdown = ? WHERE study_item_id = ?',
+          [String(fields['prompt']), operation.entityId]);
+        if (fields['answer'] !== undefined) await store.executeSql(
+          'UPDATE memory_card SET answer_markdown = ? WHERE study_item_id = ?',
+          [String(fields['answer']), operation.entityId]);
+        if (fields['hints'] !== undefined) await store.executeSql(
+          'UPDATE memory_card SET hints_json = ? WHERE study_item_id = ?',
+          [JSON.stringify(fields['hints']), operation.entityId]);
+        if (fields['answerPoints'] !== undefined) await store.executeSql(
+          'UPDATE memory_card SET answer_points_json = ? WHERE study_item_id = ?',
+          [JSON.stringify(fields['answerPoints']), operation.entityId]);
+      } else {
+        if (fields['sourceName'] !== undefined) await store.executeSql(
+          'UPDATE math_problem SET source_name = ? WHERE study_item_id = ?',
+          [String(fields['sourceName']), operation.entityId]);
+        if (fields['solution'] !== undefined) await store.executeSql(
+          'UPDATE math_problem SET solution_markdown = ? WHERE study_item_id = ?',
+          [String(fields['solution']), operation.entityId]);
+        if (fields['wrongStep'] !== undefined) await store.executeSql(
+          'UPDATE math_problem SET wrong_step_markdown = ? WHERE study_item_id = ?',
+          [String(fields['wrongStep']), operation.entityId]);
+        if (fields['keyHint'] !== undefined) await store.executeSql(
+          'UPDATE math_problem SET key_hint_markdown = ? WHERE study_item_id = ?',
+          [String(fields['keyHint']), operation.entityId]);
+      }
+    }
+  }
+
+  private async applyReviewAction(store: relationalStore.RdbStore, operation: PulledOperation): Promise<void> {
+    const fields = operation.changedFields; const itemId = String(fields['studyItemId']);
+    const check = await store.querySql('SELECT COUNT(*) FROM study_item WHERE id = ?', [itemId]);
+    let exists = false; try { exists = check.goToFirstRow() && check.getLong(0) > 0; } finally { check.close(); }
+    if (!exists) return;
+    await store.executeSql(`INSERT OR IGNORE INTO review_action_v4 (action_id, study_item_id, algorithm,
+      feedback, reviewed_at, duration_seconds, error_reason, hint_revealed, device_id, device_counter,
+      causal_cursor, source_generation, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 4, ?)`,
+      [operation.entityId, itemId, String(fields['algorithm']), Number(fields['feedback']),
+        Number(fields['reviewedAt']), Number(fields['durationSeconds'] ?? 0), fields['errorReason'] ?? null,
+        Boolean(fields['hintRevealed'] ?? false) ? 1 : 0, operation.deviceId, operation.deviceCounter,
+        operation.serverSeq, operation.occurredAt]);
+    await store.executeSql('UPDATE schedule_cache_v4 SET dirty = 1 WHERE study_item_id = ?', [itemId]);
+  }
+
+  private async applyMemoryCard(store: relationalStore.RdbStore, operation: PulledOperation): Promise<void> {
+    const fields = operation.changedFields;
+    if (fields['templateType'] !== undefined) await store.executeSql(
+      'UPDATE memory_card SET template_type = ? WHERE study_item_id = ?',
+      [String(fields['templateType']), operation.entityId]);
+    if (fields['promptMarkdown'] !== undefined) await store.executeSql(
+      'UPDATE memory_card SET prompt_markdown = ? WHERE study_item_id = ?',
+      [String(fields['promptMarkdown']), operation.entityId]);
+    if (fields['answerMarkdown'] !== undefined) await store.executeSql(
+      'UPDATE memory_card SET answer_markdown = ? WHERE study_item_id = ?',
+      [String(fields['answerMarkdown']), operation.entityId]);
+    if (fields['hints'] !== undefined) await store.executeSql(
+      'UPDATE memory_card SET hints_json = ? WHERE study_item_id = ?',
+      [JSON.stringify(fields['hints']), operation.entityId]);
+    if (fields['answerPoints'] !== undefined) await store.executeSql(
+      'UPDATE memory_card SET answer_points_json = ? WHERE study_item_id = ?',
+      [JSON.stringify(fields['answerPoints']), operation.entityId]);
+    if (fields['occlusions'] !== undefined) await store.executeSql(
+      'UPDATE memory_card SET occlusions_json = ? WHERE study_item_id = ?',
+      [JSON.stringify(fields['occlusions']), operation.entityId]);
+  }
+
+  private async applyMathProblem(store: relationalStore.RdbStore, operation: PulledOperation): Promise<void> {
+    const fields = operation.changedFields;
+    const mappings: Array<{wire: string, column: string}> = [
+      { wire: 'sourceName', column: 'source_name' }, { wire: 'promptMarkdown', column: 'prompt_markdown' },
+      { wire: 'solutionMarkdown', column: 'solution_markdown' },
+      { wire: 'wrongStepMarkdown', column: 'wrong_step_markdown' },
+      { wire: 'keyHintMarkdown', column: 'key_hint_markdown' },
+      { wire: 'defaultErrorReason', column: 'default_error_reason' },
+    ];
+    for (const mapping of mappings) if (fields[mapping.wire] !== undefined) await store.executeSql(
+      `UPDATE math_problem SET ${mapping.column} = ? WHERE study_item_id = ?`,
+      [String(fields[mapping.wire]), operation.entityId]);
+  }
+
+  private async applyTag(store: relationalStore.RdbStore, operation: PulledOperation): Promise<void> {
+    const name = String(operation.changedFields['name'] ?? '').trim(); if (name.length === 0) return;
+    await store.executeSql(`INSERT OR IGNORE INTO tag (id, name, created_at, updated_at, deleted_at)
+      VALUES (?, ?, ?, ?, ?)`, [operation.entityId, name, operation.occurredAt, operation.occurredAt,
+      operation.action === 'delete' ? operation.occurredAt : null]);
+    await store.executeSql('UPDATE tag SET name = ?, updated_at = ?, deleted_at = ? WHERE id = ?',
+      [name, operation.occurredAt, operation.action === 'delete' ? operation.occurredAt : null,
+        operation.entityId]);
+  }
+
+  private async applyRelation(store: relationalStore.RdbStore, operation: PulledOperation): Promise<void> {
+    const fields = operation.changedFields;
+    if (String(fields['relationType'] ?? '') !== 'study_item_tag') return;
+    const source = String(fields['sourceId'] ?? ''); const target = String(fields['targetId'] ?? '');
+    if (source.length === 0 || target.length === 0 || !['add', 'remove'].includes(operation.action)) return;
+    await store.executeSql(`INSERT OR IGNORE INTO relation_operation (operation_id, relation_type,
+      source_id, target_id, action, device_id, device_counter, observed_adds_json, occurred_at)
+      VALUES (?, 'study_item_tag', ?, ?, ?, ?, ?, ?, ?)`, [operation.operationId, source, target,
+      operation.action, operation.deviceId, operation.deviceCounter,
+      JSON.stringify(fields['observedAdds'] ?? []), operation.occurredAt]);
+    const query = await store.querySql(`SELECT EXISTS (SELECT 1 FROM relation_operation add_op
+      WHERE add_op.relation_type = 'study_item_tag' AND add_op.source_id = ? AND add_op.target_id = ?
+        AND add_op.action = 'add' AND NOT EXISTS (SELECT 1 FROM relation_operation remove_op,
+          json_each(remove_op.observed_adds_json) observed
+          WHERE remove_op.relation_type = add_op.relation_type
+            AND remove_op.source_id = add_op.source_id AND remove_op.target_id = add_op.target_id
+            AND remove_op.action = 'remove' AND observed.value = add_op.operation_id))`, [source, target]);
+    let active = false; try { active = query.goToFirstRow() && query.getLong(0) !== 0; } finally { query.close(); }
+    if (active) await store.executeSql(`INSERT OR IGNORE INTO study_item_tag
+      (study_item_id, tag_id) SELECT ?, ? WHERE EXISTS (SELECT 1 FROM study_item WHERE id = ?)
+      AND EXISTS (SELECT 1 FROM tag WHERE id = ?)`, [source, target, source, target]);
+    else await store.executeSql(
+      'DELETE FROM study_item_tag WHERE study_item_id = ? AND tag_id = ?', [source, target]);
+  }
+
+  private async applyLearningPreferences(store: relationalStore.RdbStore,
+    operation: PulledOperation): Promise<void> {
+    const fields = operation.changedFields;
+    const mappings: Array<{wire: string, column: string}> = [
+      { wire: 'dailyNewMemoryLimit', column: 'daily_new_memory_limit' },
+      { wire: 'sessionMinutes', column: 'session_minutes' },
+      { wire: 'memoryPreset', column: 'memory_preset' },
+      { wire: 'mathIntensity', column: 'math_intensity' },
+      { wire: 'schedulerGeneration', column: 'scheduler_generation' },
+    ];
+    for (const mapping of mappings) if (fields[mapping.wire] !== undefined) await store.executeSql(
+      `UPDATE learning_preferences SET ${mapping.column} = ?, updated_at = ? WHERE singleton = 1`,
+      [fields[mapping.wire], operation.occurredAt]);
+  }
+
+  private async rebuildDirtySchedules(): Promise<void> {
+    const store = await this.open(); const query = await store.querySql(`SELECT c.study_item_id, i.kind
+      FROM schedule_cache_v4 c JOIN study_item i ON i.id = c.study_item_id WHERE c.dirty = 1`);
+    const dirty: Array<{id: string, kind: string}> = [];
+    try { if (query.goToFirstRow()) do { dirty.push({ id: query.getString(0), kind: query.getString(1) }); }
+      while (query.goToNextRow()); } finally { query.close(); }
+    store.beginTransaction();
+    try { for (const item of dirty) {
+      const facts = await this.reviewFacts(store, item.id); const order = reviewfault.canonicalOrderV4(facts);
+      let dueAt = 0; let lastReviewedAt = 0;
+      if (item.kind === 'memory_card') {
+        let state = 0; let difficulty = 0; let stability = 0; let repetitions = 0; let lapses = 0;
+        let consecutiveLapses = 0;
+        order.forEach((index: number, history: number) => { const fact = facts[index];
+          const effective = Math.max(fact.reviewedAt, lastReviewedAt);
+          const value = reviewfault.reviewMemoryV3({ state, difficulty, stabilityDays: stability, dueAt,
+            lastReviewedAt, repetitions, lapses, rating: fact.feedback, preset: 1, reviewedAt: effective,
+            historyCount: history, calibrationImprovement: 0, consecutiveLapses });
+          state = value.state; difficulty = value.difficulty; stability = value.stabilityDays;
+          dueAt = value.dueAt; lastReviewedAt = effective; repetitions = value.repetitions; lapses = value.lapses;
+          consecutiveLapses = fact.feedback === 1 ? consecutiveLapses + 1 : 0;
+        });
+        await store.executeSql(`UPDATE schedule_state_v2 SET due_at = ?, last_reviewed_at = ?,
+          repetitions = ?, updated_at = ? WHERE study_item_id = ?`,
+          [dueAt, lastReviewedAt, repetitions, this.now(), item.id]);
+        await store.executeSql(`UPDATE memory_schedule_state SET state = ?, difficulty = ?,
+          stability_days = ?, lapses = ? WHERE study_item_id = ?`, [state, difficulty, stability, lapses, item.id]);
+        await store.executeSql(`UPDATE study_item SET scheduler_state = ?, difficulty = ?,
+          stability_days = ?, due_at = ?, last_reviewed_at = ?, repetitions = ?, lapses = ?,
+          updated_at = ? WHERE id = ?`, [state, difficulty, stability, dueAt, lastReviewedAt,
+          repetitions, lapses, this.now(), item.id]);
+      } else {
+        let mastery = 0; let streak = 0; let repetitions = 0; let failures = 0;
+        let lapses = 0; let scheduledDays = 0;
+        order.forEach((index: number) => { const fact = facts[index]; const effective = Math.max(fact.reviewedAt, lastReviewedAt);
+          const value = reviewfault.reviewMathV3({ masteryLevel: mastery, fluentStreak: streak, dueAt,
+            lastReviewedAt, repetitions, feedback: fact.feedback, errorReason: this.errorReason(fact.errorReason),
+            hintRevealed: fact.hintRevealed ? 1 : 0, intensity: 1, reviewedAt: effective,
+            durationSeconds: fact.durationSeconds, durationQuality: 0, consecutiveFailures: failures });
+          mastery = value.masteryLevel; streak = value.fluentStreak; dueAt = value.dueAt;
+          lastReviewedAt = effective; repetitions = value.repetitions; scheduledDays = value.scheduledDays;
+          if (fact.feedback <= 1) lapses++; failures = fact.feedback <= 1 ? failures + 1 : 0;
+        });
+        await store.executeSql(`UPDATE schedule_state_v2 SET due_at = ?, last_reviewed_at = ?,
+          repetitions = ?, updated_at = ? WHERE study_item_id = ?`,
+          [dueAt, lastReviewedAt, repetitions, this.now(), item.id]);
+        await store.executeSql(`UPDATE math_schedule_state SET mastery_level = ?, fluent_streak = ?
+          WHERE study_item_id = ?`, [mastery, streak, item.id]);
+        await store.executeSql(`UPDATE study_item SET scheduler_state = ?, difficulty = ?,
+          stability_days = ?, due_at = ?, last_reviewed_at = ?, repetitions = ?, lapses = ?,
+          updated_at = ? WHERE id = ?`, [repetitions === 0 ? 0 : 2,
+          repetitions === 0 ? 0 : mastery + 1, scheduledDays, dueAt, lastReviewedAt,
+          repetitions, lapses, this.now(), item.id]);
+      }
+      await store.executeSql(`UPDATE schedule_cache_v4 SET due_at = ?, replayed_action_count = ?,
+        dirty = 0, rebuilt_at = ? WHERE study_item_id = ?`, [dueAt, facts.length, this.now(), item.id]);
+    } store.commit(); } catch (error) { store.rollBack(); throw error; }
+  }
+
+  private async reviewFacts(store: relationalStore.RdbStore, itemId: string): Promise<ReviewFact[]> {
+    const result = await store.querySql(`SELECT action_id, device_id, device_counter, causal_cursor,
+      feedback, reviewed_at, COALESCE(duration_seconds, 0), COALESCE(error_reason, ''), hint_revealed
+      FROM review_action_v4 WHERE study_item_id = ?`, [itemId]); const values: ReviewFact[] = [];
+    try { if (result.goToFirstRow()) do { values.push({ actionId: result.getString(0), deviceId: result.getString(1),
+      deviceCounter: result.getLong(2), causalCursor: result.getLong(3), feedback: result.getLong(4),
+      reviewedAt: result.getLong(5), durationSeconds: result.getLong(6), errorReason: result.getString(7),
+      hintRevealed: result.getLong(8) !== 0 }); } while (result.goToNextRow()); } finally { result.close(); }
+    return values;
+  }
+  private errorReason(value: string): number { return ['','concept','approach','calculation','misread',
+    'forgotten_fact','timeout','other'].indexOf(value); }
+
+  private async enqueue(store: relationalStore.RdbStore, type: string, id: string, action: string,
+    fields: Record<string, Object>, occurredAt: number): Promise<void> {
+    const identity = await this.counter(store); await this.insertOutbox(store, identity, type, id, action, fields, occurredAt);
+  }
+  private async counter(store: relationalStore.RdbStore): Promise<{deviceId: string, counter: number, cursor: number}> {
+    const result = await store.querySql(`SELECT d.device_id, d.next_counter, COALESCE((SELECT server_seq
+      FROM sync_cursor WHERE workspace_id = d.workspace_id), 0) FROM local_device d WHERE singleton = 1`);
+    try { result.goToFirstRow(); const value = { deviceId: result.getString(0), counter: result.getLong(1), cursor: result.getLong(2) };
+      await store.executeSql('UPDATE local_device SET next_counter = next_counter + 1 WHERE singleton = 1'); return value;
+    } finally { result.close(); }
+  }
+  private async insertOutbox(store: relationalStore.RdbStore, identity: {deviceId: string, counter: number, cursor: number},
+    type: string, id: string, action: string, fields: Record<string, Object>, occurredAt: number): Promise<void> {
+    await store.executeSql(`INSERT INTO sync_outbox (operation_id, device_id, device_counter, base_cursor,
+      base_revision, entity_type, entity_id, action, changed_fields_json, occurred_at)
+      VALUES (?, ?, ?, ?, 0, ?, ?, ?, ?, ?)`, [util.generateRandomUUID(true), identity.deviceId,
+      identity.counter, identity.cursor, type, id, action, JSON.stringify(fields), occurredAt]);
+  }
+  private now(): number { return Math.floor(Date.now() / 1000); }
+
+  private async version(store: relationalStore.RdbStore): Promise<number> {
+    const result = await store.querySql('PRAGMA user_version');
+    try { return result.goToFirstRow() ? result.getLong(0) : 0; } finally { result.close(); }
+  }
+  private async applyMigration(store: relationalStore.RdbStore, version: number): Promise<void> {
+    const names = ['', '001_initial.sql', '002_v0_2.sql', '003_v0_3.sql', '004_v0_4.sql'];
+    const bytes = await this.context.resourceManager.getRawFileContent(`contracts/${names[version]}`);
+    const script = new TextDecoder().decode(bytes); store.beginTransaction();
+    try { for (const statement of this.statements(script)) await store.executeSql(statement);
+      await store.executeSql(`PRAGMA user_version = ${version}`); store.commit();
+    } catch (error) { store.rollBack(); throw error; }
+  }
+  private statements(script: string): string[] {
+    const result: string[] = []; let current = ''; let trigger = false;
+    for (const raw of script.split('\n')) { const line = raw.trim();
+      if (line.length === 0 || line.startsWith('--') || line.toUpperCase().startsWith('PRAGMA FOREIGN_KEYS') ||
+        line.toUpperCase().startsWith('PRAGMA USER_VERSION') || line.toUpperCase() === 'BEGIN IMMEDIATE;' ||
+        line.toUpperCase() === 'COMMIT;') continue;
+      if (line.toUpperCase().startsWith('CREATE TRIGGER')) trigger = true; current += `${raw}\n`;
+      const complete = trigger ? line.toUpperCase() === 'END;' : line.endsWith(';');
+      if (complete) { result.push(current.trim().replace(/;$/, '')); current = ''; trigger = false; }
+    }
+    if (current.trim().length > 0) throw new Error('Incomplete schema migration'); return result;
+  }
+}

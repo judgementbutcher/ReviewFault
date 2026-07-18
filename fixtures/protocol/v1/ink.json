@@ -1,0 +1,21 @@
+{
+  "format": "reviewfault-ink",
+  "version": 1,
+  "pages": [
+    {
+      "id": "page-1",
+      "backgroundMediaSha256": null,
+      "strokes": [
+        {
+          "tool": "pen",
+          "color": "#ff172033",
+          "width": 0.006,
+          "points": [
+            { "x": 0.1, "y": 0.2, "pressure": 0.5, "tiltX": 0, "tiltY": 0, "time": 0 },
+            { "x": 0.4, "y": 0.5, "pressure": 0.8, "tiltX": 2, "tiltY": -3, "time": 16 }
+          ]
+        }
+      ]
+    }
+  ]
+}

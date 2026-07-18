@@ -1,0 +1,7 @@
+{
+  "name": "entry",
+  "version": "0.4.0",
+  "description": "ReviewFault entry module",
+  "main": "",
+  "dependencies": { "libreviewfault.so": "file:./src/main/cpp/types/libreviewfault" }
+}

@@ -2,11 +2,13 @@
 
 ReviewFault 是面向考研数学与 408 的本地优先间隔学习软件。它不是把两类内容都压成普通闪卡：数学侧强调低摩擦记录、重做与错因复盘；408 侧强调主动回忆、分层提示与知识点关联。
 
-当前版本为 **0.3.2**（schema v3、调度 ABI v3、备份协议 v3），包含共享核心和两个原生客户端：
+当前版本为 **0.4.0**（schema v4、调度 ABI v4、备份协议 v4；调度算法仍为 v3），包含共享核心、同步服务和三个原生客户端：
 
 - Android：Kotlin + Jetpack Compose
 - Windows：C# + WinUI 3
-- 共享内核：无第三方依赖的 C++20，通过稳定的 C ABI 接入两个客户端
+- HarmonyOS 6：ArkTS + ArkUI Stage + NAPI
+- 同步服务：ASP.NET Core 10 + PostgreSQL 18
+- 共享内核：无第三方依赖的 C++20，通过稳定的 C ABI 接入三个客户端
 
 ## 宿主环境可运行内容
 
@@ -29,14 +31,24 @@ Android 调试 APK 在完成 Android 构建后位于 `apps/android/app/build/out
 - [构建与验证](docs/building.md)
 - [需求验证矩阵](docs/verification.md)
 - [视觉与无障碍 token](docs/design-tokens.md)
+- [HarmonyOS 6 SDK 验证门禁](docs/harmony-sdk-validation.md)
+- [v0.4.0 发布说明](docs/release-v0.4.0.md)
 - [v0.2 调度回放基线](docs/baseline-v0.2.md)
 - [v0.3.2 开发计划](docs/roadmap-v0.3.2.md)
 - [v0.3.2 发布说明](docs/release-v0.3.2.md)
 
-`fixtures/scheduler_v1.tsv` 保留用于历史重放；`fixtures/memory_scheduler_v2.tsv` 与
+`fixtures/scheduler_v1.tsv` 保留用于历史重放；`fixtures/protocol/v1/` 固定同步与笔迹协议黄金样例；`fixtures/memory_scheduler_v2.tsv` 与
 `fixtures/math_scheduler_v2.tsv` 保留冻结的 v2 黄金样例；`fixtures/*_scheduler_v3.tsv`
 固定 v3 决策结果。JNI 和 P/Invoke 绑定只有在
 相同输入产生相同状态与 UTC 到期秒时才算接入完成。
+
+## v0.4 数据与交付基线
+
+- 不可变 `review_action_v4`、可重建调度缓存及确定性的 ABI v4 历史重放；
+- 本地 `sync_outbox`、cursor/revision/conflict、随机设备 UUID 与字段级同步协议；
+- v4 净化备份排除设备身份、令牌、游标、outbox、冲突和本地笔迹草稿；
+- 邀请制账号服务、设备 refresh token 轮换、workspace AES-256-GCM 加密及 Compose 部署；
+- Android 纯 Compose 入口、Harmony Stage/NAPI 工程和五路发布门禁。
 
 ## v0.3 已实现
 

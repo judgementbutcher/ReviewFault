@@ -1,8 +1,8 @@
-# 跨端数据契约 v3
+# 跨端数据契约 v4
 
-schema v3 通过 `003_v0_3.sql` 从 v2 顺序升级，旧迁移保持不变。升级保留
-所有旧 `due_at`；有历史的项目标记 `needs_history_replay=1`，第一次 v2 作答时由仓储
-回放 v1 `review_log`/`attempt` 后写回类型化状态。
+schema v4 通过 `004_v0_4.sql` 从 v3 顺序升级，旧迁移保持不变。升级保留旧事件表并把
+v1/v2/v3 历史投影为不可变 `review_action_v4`；`due_at`、难度和熟练度属于可重建调度投影，
+不会作为同步事实覆盖其他设备。
 
 ## 调度与事件
 
@@ -16,6 +16,18 @@ schema v3 通过 `003_v0_3.sql` 从 v2 顺序升级，旧迁移保持不变。�
 审计与历史迁移。启用 v0.3 调度时，新作答写不可变的 `review_event_v3` 与类型明细；公共事件
 记录参数校验和、时区偏移、耗时质量和 JSON 决策快照。`algorithm_parameter_registry` 固定算法名、
 算法版本、参数版本、校验和及生效时间。切回 v0.2 参数时继续写 v2 事件，不改写任何历史。
+
+v4 新作答同时写本地审计事件、`review_action_v4` 和同一设备计数器对应的 outbox 操作。
+跨设备回放先按因果游标和设备内计数排序，再以时间/事实 ID 稳定打破并发平局；结果写回
+`schedule_cache_v4`、类型化调度表和客户端当前读取的 `study_item` 投影。
+
+## 同步与备份
+
+- `local_device` 保存随机安装 UUID、账号/workspace 绑定和单调设备计数器；
+- `sync_cursor`、`sync_revision`、`sync_outbox` 与 `sync_conflict` 保存本地同步状态；
+- `relation_operation` 以 observed-remove 事实表达关系增删；
+- pull 投影远端事实时抑制本地触发器产生的 outbox 回环；
+- v4 备份排除设备身份、账号令牌、游标、outbox、冲突和本地笔迹草稿。
 
 ## 设置、题库与删除
 

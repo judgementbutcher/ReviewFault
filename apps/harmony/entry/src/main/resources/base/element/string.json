@@ -1,0 +1,8 @@
+{
+  "string": [
+    { "name": "app_name", "value": "ReviewFault" },
+    { "name": "module_desc", "value": "ReviewFault" },
+    { "name": "EntryAbility_desc", "value": "ReviewFault" },
+    { "name": "EntryAbility_label", "value": "ReviewFault" }
+  ]
+}

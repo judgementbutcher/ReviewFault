@@ -2,7 +2,10 @@ package cn.reviewfault.app
 
 import android.app.Application
 import android.content.Context
+import android.net.Uri
+import android.os.Build
 import androidx.lifecycle.AndroidViewModel
+import androidx.lifecycle.SavedStateHandle
 import androidx.lifecycle.viewModelScope
 import cn.reviewfault.app.data.AppDatabase
 import cn.reviewfault.app.data.DashboardSummary
@@ -10,11 +13,17 @@ import cn.reviewfault.app.data.DeletionState
 import cn.reviewfault.app.data.LearningPreferences
 import cn.reviewfault.app.data.LibraryFilter
 import cn.reviewfault.app.data.StudyRow
+import cn.reviewfault.app.sync.AccountTokens
+import cn.reviewfault.app.sync.AuthSession
+import cn.reviewfault.app.sync.SecureTokenStore
+import cn.reviewfault.app.sync.SyncClient
 import java.time.Instant
 import java.time.ZoneId
 import java.time.ZonedDateTime
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.FlowPreview
+import kotlinx.coroutines.delay
+import kotlinx.coroutines.isActive
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
@@ -49,30 +58,76 @@ data class AppUiState(
     val deletion: DeletionState? = null,
     val message: String? = null,
     val operationInProgress: Boolean = false,
+    val syncEndpoint: String = "https://sync.reviewfault.app",
+    val accountId: String? = null,
+    val syncPendingCount: Int = 0,
+    val lastSyncedAt: Long? = null,
+    val syncInProgress: Boolean = false,
 )
 
 @OptIn(FlowPreview::class)
-class AppViewModel(application: Application) : AndroidViewModel(application) {
+class AppViewModel(application: Application, private val savedState: SavedStateHandle) : AndroidViewModel(application) {
     private val database = AppDatabase.get(application)
     private val devicePreferences =
         application.getSharedPreferences("appearance_reminders", Context.MODE_PRIVATE)
+    private val tokenStore = SecureTokenStore(application)
+    private val syncPreferences = application.getSharedPreferences("sync_settings", Context.MODE_PRIVATE)
+    private var tokens: AccountTokens? = tokenStore.load()
     private val mutableState = MutableStateFlow(AppUiState(
+        destination = savedState.get<String>("destination")?.let(AppDestination::valueOf)
+            ?: AppDestination.Today,
+        answerRevealed = savedState["answerRevealed"] ?: false,
+        startedAt = savedState["startedAt"] ?: 0L,
+        selectedIds = (savedState.get<ArrayList<String>>("selectedIds") ?: arrayListOf()).toSet(),
         themeMode = devicePreferences.getInt("theme", 0),
         reminderEnabled = devicePreferences.getBoolean("reminder_enabled", false),
         reminderTime = devicePreferences.getString("reminder_time", "20:00") ?: "20:00",
+        syncEndpoint = syncPreferences.getString("endpoint", "https://sync.reviewfault.app")
+            ?: "https://sync.reviewfault.app",
+        accountId = tokens?.accountId,
     ))
     val state: StateFlow<AppUiState> = mutableState.asStateFlow()
-    val searchQuery = MutableStateFlow("")
+    val searchQuery = MutableStateFlow(savedState["searchQuery"] ?: "")
     private val filterState = MutableStateFlow(LibraryFilter())
+    @Volatile private var pendingInk: Pair<String, ByteArray>? = null
 
     init {
         refreshToday()
         loadSettings()
+        refreshSyncState()
+        if (tokens != null) syncNow()
+        viewModelScope.launch {
+            while (isActive) {
+                delay(5 * 60 * 1000L)
+                if (tokens != null) syncNow()
+            }
+        }
         viewModelScope.launch {
             searchQuery.debounce(300).distinctUntilChanged().collectLatest { query ->
                 filterState.update { it.copy(query = query, now = Instant.now().epochSecond, offset = 0) }
                 loadLibrary()
             }
+        }
+        viewModelScope.launch {
+            mutableState.collectLatest { state ->
+                savedState["destination"] = state.destination.name
+                savedState["answerRevealed"] = state.answerRevealed
+                savedState["startedAt"] = state.startedAt
+                savedState["selectedIds"] = ArrayList(state.selectedIds)
+                savedState["currentId"] = state.current?.id
+            }
+        }
+        savedState.get<String>("currentId")?.let { currentId ->
+            io {
+                val restored = database.search(LibraryFilter(limit = 5000)).firstOrNull { it.id == currentId }
+                mutableState.update { state ->
+                    if (restored == null) state.copy(destination = AppDestination.Today)
+                    else state.copy(current = restored, loading = false)
+                }
+            }
+        }
+        viewModelScope.launch {
+            searchQuery.collectLatest { savedState["searchQuery"] = it }
         }
     }
 
@@ -243,16 +298,20 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
         val row = snapshot.current ?: return@io
         val reviewedAt = Instant.now().epochSecond
         val durationSeconds = (reviewedAt - snapshot.startedAt).toInt().coerceAtLeast(0)
+        pendingInk?.takeIf { it.first == row.id }?.let { database.saveInkDraft(row.id, it.second) }
         val result = database.review(
             row, rating, reviewedAt, durationSeconds,
             mathResult, errorReason, hintRevealed,
         )
+        if (row.kind == "math_problem") database.freezeInkDraft(row.id)
+        pendingInk = null
         mutableState.update { it.copy(
             sessionElapsedSeconds = it.sessionElapsedSeconds + durationSeconds,
             sessionReviewedCount = it.sessionReviewedCount + 1,
         ) }
         refreshTodayNow()
         startReviewNow("已保存，下次约 ${formatDays(result.scheduledDays)} 后")
+        syncNow()
     }
 
     fun deleteCurrentWithoutReview() = io(exclusive = true) {
@@ -261,6 +320,7 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
         mutableState.update { it.copy(current = null, destination = AppDestination.Today,
             deletion = deletion, message = "已移入回收站；本次未生成评分") }
         refreshToday(); loadTrash()
+        syncNow()
     }
 
     fun loadSettings() = io {
@@ -282,10 +342,142 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
             reminderEnabled = reminderEnabled, reminderTime = reminderTime,
             message = "设置已保存；算法设置只影响之后的作答") }
         refreshTodayNow()
+        syncNow()
     }
 
     fun loadTrash() = io {
         mutableState.update { it.copy(trash = database.search(LibraryFilter(deletedOnly = true))) }
+    }
+
+    fun saveInkDraft(studyItemId: String, gzipJson: ByteArray) {
+        pendingInk = studyItemId to gzipJson
+        io { database.saveInkDraft(studyItemId, gzipJson) }
+    }
+
+    fun registerAccount(endpoint: String, email: String, password: String, invitationCode: String) =
+        io(exclusive = true) {
+            saveSyncEndpoint(endpoint)
+            SyncClient(endpoint).register(email, password, invitationCode)
+            mutableState.update { it.copy(message = "注册申请已提交，请先完成邮箱验证再登录") }
+        }
+
+    fun loginAccount(endpoint: String, email: String, password: String) = io(exclusive = true) {
+        saveSyncEndpoint(endpoint)
+        val identity = database.syncIdentity()
+        val session = SyncClient(endpoint).login(
+            email, password, identity.deviceId, "${Build.MANUFACTURER} ${Build.MODEL}",
+        )
+        database.bindAccount(session.accountId, session.workspaceId)
+        saveSession(session)
+        mutableState.update { it.copy(accountId = session.accountId, message = "已登录，正在同步") }
+        syncNowInternal()
+    }
+
+    fun syncNow() = io {
+        if (mutableState.value.syncInProgress || tokens == null) return@io
+        syncNowInternal()
+    }
+
+    private fun syncNowInternal() {
+        mutableState.update { it.copy(syncInProgress = true) }
+        try {
+            val endpoint = mutableState.value.syncEndpoint
+            val client = SyncClient(endpoint)
+            val identity = database.syncIdentity()
+            var session = tokens ?: return
+            if (session.accessExpiresAt <= Instant.now().epochSecond + 60) {
+                val refreshed = client.refresh(identity.deviceId, session.refreshToken)
+                require(refreshed.accountId == session.accountId && refreshed.workspaceId == session.workspaceId) {
+                    "刷新令牌返回了不同账号"
+                }
+                saveSession(refreshed)
+                session = tokens!!
+            }
+            client.uploadMedia(session.accessToken, database.mediaForSync())
+            while (true) {
+                val pending = database.pendingSyncOperations()
+                if (pending.length() == 0) break
+                val acknowledged = client.push(session.accessToken, pending)
+                require(acknowledged.isNotEmpty()) { "服务端未确认任何本地操作" }
+                database.acknowledgeSyncOperations(acknowledged)
+            }
+            var cursor = database.syncIdentity().cursor
+            do {
+                val pulled = client.pull(session.accessToken, cursor)
+                database.applyPulledOperations(session.workspaceId, pulled.operations, pulled.cursor)
+                cursor = pulled.cursor
+            } while (pulled.operations.size == 500)
+            database.missingMedia().forEach { media ->
+                database.saveDownloadedMedia(media, client.downloadMedia(session.accessToken, media.sha256))
+            }
+            val finishedAt = Instant.now().epochSecond
+            syncPreferences.edit().putLong("last_synced_at", finishedAt).apply()
+            refreshSyncState()
+            mutableState.update { it.copy(lastSyncedAt = finishedAt, message = "同步完成") }
+            refreshTodayNow(); loadLibrary()
+        } finally { mutableState.update { it.copy(syncInProgress = false) } }
+    }
+
+    fun logoutAccount() = io(exclusive = true) {
+        val session = tokens
+        if (session != null) runCatching {
+            SyncClient(mutableState.value.syncEndpoint).logout(session.accessToken)
+        }
+        tokenStore.clear(); tokens = null
+        mutableState.update { it.copy(accountId = null, message = "已退出；本地数据仍保留在此设备") }
+    }
+
+    private fun saveSyncEndpoint(endpoint: String) {
+        SyncClient(endpoint)
+        val normalized = endpoint.trim().trimEnd('/')
+        syncPreferences.edit().putString("endpoint", normalized).apply()
+        mutableState.update { it.copy(syncEndpoint = normalized) }
+    }
+
+    private fun saveSession(session: AuthSession) {
+        val stored = AccountTokens(
+            session.accountId, session.workspaceId, session.accessToken,
+            session.accessExpiresAt, session.refreshToken,
+        )
+        tokenStore.save(stored); tokens = stored
+    }
+
+    private fun refreshSyncState() {
+        val identity = database.syncIdentity()
+        val last = syncPreferences.getLong("last_synced_at", 0).takeIf { it > 0 }
+        mutableState.update { it.copy(
+            accountId = tokens?.accountId, syncPendingCount = identity.pendingCount, lastSyncedAt = last,
+        ) }
+    }
+
+    fun createMemoryCard(template: String, prompt: String, answer: String) = io(exclusive = true) {
+        database.createMemoryCard(template, prompt, answer)
+        mutableState.update { it.copy(destination = AppDestination.Today, message = "记忆卡已保存") }
+        refreshTodayNow()
+        syncNow()
+    }
+
+    fun createMathProblem(uris: List<Uri>, source: String) = io(exclusive = true) {
+        database.createMathProblemFromImages(getApplication<Application>().contentResolver, uris, source)
+        mutableState.update { it.copy(destination = AppDestination.Today, message = "数学错题已保存") }
+        refreshTodayNow()
+        syncNow()
+    }
+
+    fun exportBackup(uri: Uri) = io(exclusive = true) {
+        getApplication<Application>().contentResolver.openOutputStream(uri, "w")!!.use {
+            database.exportBackup(it)
+        }
+        mutableState.update { it.copy(message = "v4 备份已导出") }
+    }
+
+    fun restoreBackup(uri: Uri) = io(exclusive = true) {
+        getApplication<Application>().contentResolver.openInputStream(uri)!!.use {
+            database.restoreBackup(it)
+        }
+        mutableState.update { it.copy(destination = AppDestination.Today, message = "备份已恢复，将在下次同步时合并") }
+        refreshTodayNow(); loadTrash()
+        syncNow()
     }
 
     fun clearMessage(message: String) = mutableState.update {

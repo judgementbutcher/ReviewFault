@@ -1,0 +1,11 @@
+{
+  "apiType": "stageMode",
+  "buildOption": {
+    "externalNativeOptions": {
+      "path": "./src/main/cpp/CMakeLists.txt",
+      "arguments": "-DREVIEWFAULT_ROOT=../../../../..",
+      "cppFlags": "-std=c++20"
+    }
+  },
+  "targets": [{ "name": "default" }]
+}

@@ -9,6 +9,7 @@ using WinRT.Interop;
 using System.Text.Json;
 using System.Text.RegularExpressions;
 using ReviewFault.Components;
+using ReviewFault.Controls;
 using ReviewFault.Services;
 using ReviewFault.ViewModels;
 using Windows.Storage;
@@ -191,6 +192,43 @@ public sealed class MainWindow : Window
             await MessageAsync("设置已保存；只影响此后的作答。");
         }));
         panel.Children.Add(Heading("数据", 20));
+        panel.Children.Add(Heading("账号与同步", 20));
+        var endpoint = new TextBox { Header = "同步服务地址", Text = viewModel.SyncEndpoint };
+        panel.Children.Add(endpoint);
+        if (viewModel.AccountId is null)
+        {
+            var email = new TextBox { Header = "邮箱" };
+            var password = new PasswordBox { Header = "密码（至少 12 位）" };
+            var invitation = new TextBox { Header = "邀请码（注册时需要）" };
+            panel.Children.Add(email); panel.Children.Add(password); panel.Children.Add(invitation);
+            panel.Children.Add(ActionButton("注册", async () =>
+            {
+                await viewModel.RegisterAsync(endpoint.Text, email.Text, password.Password, invitation.Text);
+                await MessageAsync("注册申请已提交，请先完成邮箱验证再登录。");
+            }));
+            panel.Children.Add(ActionButton("登录并同步", async () =>
+            {
+                await viewModel.LoginAsync(endpoint.Text, email.Text, password.Password);
+                await MessageAsync("已登录并完成首次同步。");
+                await ShowSettingsAsync();
+            }));
+        }
+        else
+        {
+            panel.Children.Add(Body($"账号 {viewModel.AccountId[..Math.Min(8, viewModel.AccountId.Length)]}… · " +
+                $"待上传 {viewModel.PendingSyncCount} 项"));
+            if (viewModel.LastSyncedAt is long last)
+                panel.Children.Add(Body($"上次同步 {DateTimeOffset.FromUnixTimeSeconds(last).ToLocalTime():g}"));
+            panel.Children.Add(ActionButton("立即同步", async () =>
+            {
+                await viewModel.SyncNowAsync(); await MessageAsync("同步完成。"); await ShowSettingsAsync();
+            }));
+            panel.Children.Add(ActionButton("退出账号", async () =>
+            {
+                await viewModel.LogoutAsync(); await MessageAsync("已退出；本地数据仍保留在此设备。");
+                await ShowSettingsAsync();
+            }));
+        }
         panel.Children.Add(ActionButton("导出完整备份", ExportBackupAsync));
         panel.Children.Add(ActionButton("从备份恢复", RestoreBackupAsync));
         panel.Children.Add(Body("主题、提醒时间、星期和通知权限保存在本设备，不会被备份恢复覆盖。"));
@@ -250,6 +288,15 @@ public sealed class MainWindow : Window
         }
         if (row.Kind == "math_problem")
             panel.Children.Add(ActionButton("补充解答、错因与关键提示", () => ShowMathDetailsEditorAsync(row)));
+        InkPad? inkPad = null;
+        if (row.Kind == "math_problem")
+        {
+            panel.Children.Add(Heading("演算", 19));
+            inkPad = new InkPad();
+            inkPad.DocumentChanged += async (_, document) =>
+                await viewModel.Repository.SaveInkDraftAsync(row.Id, document);
+            panel.Children.Add(inkPad);
+        }
         var hints = StructuredItems(row);
         if (row.TemplateType == "layered_hint" && hints.Count > 0)
         {
@@ -288,8 +335,11 @@ public sealed class MainWindow : Window
             ratings.Children.Add(ActionButton(label, async () =>
             {
                 var reviewedAt = DateTimeOffset.UtcNow.ToUnixTimeSeconds();
+                if (inkPad?.HasInk == true)
+                    await viewModel.Repository.SaveInkDraftAsync(row.Id, inkPad.Snapshot());
                 var result = await viewModel.Repository.ReviewAsync(
                     row, rating, reviewedAt, checked((int)(reviewedAt - startedAt)), mathResult);
+                await viewModel.SyncNowAsync();
                 reviewSessionElapsedSeconds += checked((int)(reviewedAt - startedAt));
                 reviewSessionReviewed++;
                 if (reviewSessionElapsedSeconds >= reviewSessionTargetSeconds)

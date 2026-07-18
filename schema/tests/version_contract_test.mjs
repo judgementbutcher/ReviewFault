@@ -1,15 +1,18 @@
 import assert from 'node:assert/strict';
 import { readFileSync, readdirSync } from 'node:fs';
 
-const version = '0.3.2';
+const version = '0.4.0';
 const read = (relative) => readFileSync(new URL(relative, import.meta.url), 'utf8');
 
 const contracts = [
   ['README', '../../README.md', `当前版本为 **${version}**`],
   ['CMake', '../../CMakeLists.txt', `VERSION ${version}`],
   ['Android', '../../apps/android/app/build.gradle.kts', `versionName = "${version}"`],
+  ['Harmony', '../../apps/harmony/AppScope/app.json5', `"versionName": "${version}"`],
   ['Windows project', '../../apps/windows/ReviewFault/ReviewFault.csproj', `<Version>${version}</Version>`],
   ['Windows manifest', '../../apps/windows/ReviewFault/app.manifest', `version="${version}.0"`],
+  ['Windows installer', '../../apps/windows/ReviewFault.Installer/ReviewFault.Installer.wixproj', `>${version}</ProductVersion>`],
+  ['sync deployment', '../../deploy/compose.yaml', `reviewfault-sync:${version}`],
   ['verify workflow', '../../.github/workflows/verify.yml', `APP_VERSION: ${version}`],
   ['release workflow', '../../.github/workflows/release.yml', `APP_VERSION: ${version}`],
   ['release notes', `../../docs/release-v${version}.md`, `# ReviewFault v${version}`],
@@ -18,6 +21,9 @@ const contracts = [
 for (const [name, path, token] of contracts) {
   assert(read(path).includes(token), `${name} is not synchronized to ${version}`);
 }
+assert(read('../../apps/android/app/build.gradle.kts').includes('versionCode = 9') &&
+  read('../../apps/harmony/AppScope/app.json5').includes('"versionCode": 9'),
+  'mobile version codes must advance together for v0.4.0');
 
 for (const repository of ['../../apps/windows/ReviewFault/Data/AppRepository.cs']) {
   assert(read(repository).includes(version), `${repository} backup metadata is stale`);
@@ -32,9 +38,9 @@ assert(release.includes('ANDROID_CERT_SHA256') && release.includes('apksigner') 
   release.includes('--print-certs'),
   'release workflow must pin and verify the Android signing certificate');
 assert.deepEqual(readdirSync(new URL('../../apps/', import.meta.url)).sort(),
-  ['android', 'windows'], 'only supported platform clients may be present');
-assert(release.includes('needs: [core, android, windows]'),
-  'release workflow must be gated on both supported platform builds');
+  ['android', 'harmony', 'windows'], 'all supported platform clients must be present');
+assert(release.includes('needs: [core, backend, android, harmony, windows]'),
+  'release workflow must be gated on core, service, and all platform builds');
 assert(release.includes('test "$GITHUB_REF_NAME" = "v$APP_VERSION"'),
   'release tag must match application metadata');
 assert(release.includes(`body_path: docs/release-v${version}.md`),
@@ -44,6 +50,9 @@ assert(release.includes('WindowsAppSDKSelfContained=true') &&
   'Windows release must be self-contained and build the MSI installer');
 assert(release.includes('ReviewFault-windows-v${{ env.APP_VERSION }}-x64.msi'),
   'Windows MSI must be attached to the release');
+assert(release.includes('ReviewFault-harmony-v${{ env.APP_VERSION }}-signed.hap') &&
+  release.includes('sync-image-digest.txt'),
+  'release must attach the signed HAP and immutable service image digest');
 
 const publishProfile = read('../../apps/windows/ReviewFault/Properties/PublishProfiles/win-x64.pubxml');
 assert(publishProfile.includes('<SelfContained>true</SelfContained>') &&
