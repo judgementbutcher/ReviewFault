@@ -7,6 +7,7 @@ import android.graphics.BitmapFactory
 import android.os.Build
 import android.os.Bundle
 import androidx.activity.ComponentActivity
+import androidx.activity.compose.BackHandler
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
@@ -192,6 +193,9 @@ private fun ReviewFaultTheme(themeMode: Int, content: @Composable () -> Unit) {
 @Composable
 private fun ReviewFaultApp(state: AppUiState, model: AppViewModel) {
     val snackbar = remember { SnackbarHostState() }
+    BackHandler(enabled = state.destination == AppDestination.Review) {
+        model.finishReviewSession()
+    }
     LaunchedEffect(state.message) {
         state.message?.let { message ->
             val result = snackbar.showSnackbar(message, if (state.deletion != null) "撤销" else null)
@@ -759,7 +763,9 @@ private fun ReviewScreen(state: AppUiState, model: AppViewModel) {
     ) {
         item {
             Row(verticalAlignment = Alignment.CenterVertically) {
-                IconButton(onClick = { model.navigate(AppDestination.Today) }) { Icon(Icons.Default.Close, contentDescription = "退出复习") }
+                IconButton(onClick = model::finishReviewSession) {
+                    Icon(Icons.Default.Close, contentDescription = "结束本轮并退出复习")
+                }
                 Column(Modifier.weight(1f).padding(horizontal = 8.dp)) {
                     Text(if (row.kind == "math_problem") "数学 · 专注重做" else "408 · 主动回忆", style = MaterialTheme.typography.labelLarge, color = MaterialTheme.colorScheme.primary)
                     Text(if (state.answerRevealed) "对照答案，诚实评分" else "先独立作答，再看答案", color = MaterialTheme.colorScheme.onSurfaceVariant)
@@ -774,7 +780,7 @@ private fun ReviewScreen(state: AppUiState, model: AppViewModel) {
                 modifier = Modifier.fillMaxWidth().clip(RoundedCornerShape(8.dp)),
             )
             Text(
-                "本轮已完成 ${state.sessionReviewedCount} 条",
+                "本轮已完成 ${state.sessionReviewedCount} 条 · 跳过 ${state.sessionSkippedIds.size} 条",
                 style = MaterialTheme.typography.bodySmall,
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
             )
@@ -844,6 +850,23 @@ private fun ReviewScreen(state: AppUiState, model: AppViewModel) {
                         "轻松" to { model.score(4, null, hintRevealed = shownHints > 0) },
                     ), enabled = !state.operationInProgress)
                 }
+            }
+        }
+        item {
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.spacedBy(8.dp),
+            ) {
+                OutlinedButton(
+                    onClick = model::skipCurrent,
+                    enabled = !state.operationInProgress,
+                    modifier = Modifier.weight(1f).height(48.dp),
+                ) { Text("本轮跳过（不评分）") }
+                OutlinedButton(
+                    onClick = model::finishReviewSession,
+                    enabled = !state.operationInProgress,
+                    modifier = Modifier.weight(1f).height(48.dp),
+                ) { Text("提前结束本轮") }
             }
         }
         item {

@@ -35,6 +35,7 @@ public sealed class MainWindow : Window
     private int reviewSessionReviewed;
     private int reviewSessionElapsedSeconds;
     private bool reviewSessionAllowsNewItems = true;
+    private readonly HashSet<string> reviewSessionSkippedItemIds = new(StringComparer.Ordinal);
 
     public MainWindow()
     {
@@ -211,18 +212,29 @@ public sealed class MainWindow : Window
 
     private async Task ShowReviewAsync()
     {
+        if ((reviewSessionReviewed > 0 || reviewSessionSkippedItemIds.Count > 0) &&
+            reviewSessionElapsedSeconds >= reviewSessionTargetSeconds)
+        {
+            await FinishReviewSessionAsync();
+            return;
+        }
         var row = await viewModel.Repository.NextForReviewAsync(
-            DateTimeOffset.UtcNow.ToUnixTimeSeconds(), reviewSessionAllowsNewItems);
+            DateTimeOffset.UtcNow.ToUnixTimeSeconds(), reviewSessionAllowsNewItems,
+            reviewSessionSkippedItemIds);
         if (row is null)
         {
-            await MessageAsync("当前没有到期内容，可以先新建一张卡片。");
+            await FinishReviewSessionAsync(
+                reviewSessionReviewed == 0 && reviewSessionSkippedItemIds.Count == 0
+                    ? "当前没有待复习内容。"
+                    : null);
             return;
         }
         var startedAt = DateTimeOffset.UtcNow.ToUnixTimeSeconds();
         var panel = PagePanel();
         panel.Children.Add(Body(row.Kind == "math_problem" ? "数学 · 重做" : "408 · 主动回忆"));
         panel.Children.Add(Body(
-            $"本轮已完成 {reviewSessionReviewed} 条 · 已用约 {(reviewSessionElapsedSeconds + 59) / 60} 分钟"));
+            $"本轮已完成 {reviewSessionReviewed} 条 · 跳过 {reviewSessionSkippedItemIds.Count} 条 · " +
+            $"已用约 {(reviewSessionElapsedSeconds + 59) / 60} 分钟"));
         panel.Children.Add(Heading(
             row.Kind == "math_problem" ? "先独立完成，再看答案" : "先在脑中或纸上作答", 28));
         if (!string.IsNullOrWhiteSpace(row.Prompt)) panel.Children.Add(Card(Body(ReviewPrompt(row))));
@@ -282,9 +294,11 @@ public sealed class MainWindow : Window
                 reviewSessionReviewed++;
                 if (reviewSessionElapsedSeconds >= reviewSessionTargetSeconds)
                 {
-                    await MessageAsync(
-                        $"本轮完成：{reviewSessionReviewed} 条。最近一条下次间隔约 {FormatInterval(result.ScheduledDays)}。");
-                    await ShowHomeAsync();
+                    await FinishReviewSessionAsync(
+                        $"本轮结束：完成 {reviewSessionReviewed} 条 · " +
+                        $"跳过 {reviewSessionSkippedItemIds.Count} 条 · " +
+                        $"约 {(reviewSessionElapsedSeconds + 59) / 60} 分钟。" +
+                        $"最近一条下次间隔约 {FormatInterval(result.ScheduledDays)}。");
                     return;
                 }
                 await MessageAsync($"已保存，下次间隔约 {FormatInterval(result.ScheduledDays)}。");
@@ -293,7 +307,14 @@ public sealed class MainWindow : Window
         }
         answerPanel.Children.Add(ratings);
         panel.Children.Add(answerPanel);
-        panel.Children.Add(ActionButton("返回首页", ShowHomeAsync));
+        panel.Children.Add(ActionButton("本轮跳过（不评分）", async () =>
+        {
+            var skippedAt = DateTimeOffset.UtcNow.ToUnixTimeSeconds();
+            reviewSessionElapsedSeconds += checked((int)Math.Max(0, skippedAt - startedAt));
+            reviewSessionSkippedItemIds.Add(row.Id);
+            await ShowReviewAsync();
+        }));
+        panel.Children.Add(ActionButton("提前结束本轮", () => FinishReviewSessionAsync()));
         SetPage(panel);
     }
 
@@ -303,7 +324,20 @@ public sealed class MainWindow : Window
         reviewSessionReviewed = 0;
         reviewSessionElapsedSeconds = 0;
         reviewSessionAllowsNewItems = allowNewItems;
+        reviewSessionSkippedItemIds.Clear();
+        Navigation.IsPaneVisible = false;
         await ShowReviewAsync();
+    }
+
+    private async Task FinishReviewSessionAsync(string? overrideMessage = null)
+    {
+        var summary = overrideMessage ??
+            $"本轮结束：完成 {reviewSessionReviewed} 条 · " +
+            $"跳过 {reviewSessionSkippedItemIds.Count} 条 · " +
+            $"约 {(reviewSessionElapsedSeconds + 59) / 60} 分钟。";
+        Navigation.IsPaneVisible = true;
+        await ShowHomeAsync();
+        await MessageAsync(summary);
     }
 
     private async Task ShowMemoryEditorAsync()

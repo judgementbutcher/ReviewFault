@@ -38,7 +38,7 @@ public sealed record TrashRow(string Id, string Kind, string Prompt, long Delete
 
 public sealed class AppRepository
 {
-    private const string AppVersion = "0.3.1";
+    private const string AppVersion = "0.3.2";
     private const long MaxBackupBytes = 2L * 1024 * 1024 * 1024;
     private const int MaxBackupEntries = 10_000;
     // The v1 review_log remains read-only input for gradual history replay.
@@ -166,8 +166,17 @@ public sealed class AppRepository
             reader.GetInt32(8), reader.GetInt32(9));
     }
 
-    public async Task<StudyRow?> NextForReviewAsync(long now, bool includeNewItems = true)
+    public async Task<StudyRow?> NextForReviewAsync(
+        long now,
+        bool includeNewItems = true,
+        IReadOnlyCollection<string>? excludedItemIds = null)
     {
+        excludedItemIds ??= Array.Empty<string>();
+        if (excludedItemIds.Any(id => string.IsNullOrEmpty(id) || id.Contains('|')))
+            throw new ArgumentException("会话排除项包含非法 ID", nameof(excludedItemIds));
+        var encodedExcludedItemIds = excludedItemIds.Count == 0
+            ? ""
+            : "|" + string.Join('|', excludedItemIds.OrderBy(id => id, StringComparer.Ordinal)) + "|";
         var dayStart = new DateTimeOffset(DateTime.Today).ToUnixTimeSeconds();
         await using var connection = await OpenAsync();
         var command = connection.CreateCommand();
@@ -190,6 +199,7 @@ public sealed class AppRepository
             CROSS JOIN learning_preferences lp
             WHERE s.suspended_at IS NULL AND s.deleted_at IS NULL
               AND lp.singleton = 1
+              AND ($excludedItemIds = '' OR instr($excludedItemIds, '|' || s.id || '|') = 0)
               AND ((s.kind = 'math_problem' AND lp.include_math_problems = 1) OR
                 (s.kind = 'memory_card' AND lp.include_memory_cards = 1 AND (
                   (s.subject = 'data_structures' AND lp.enable_data_structures = 1) OR
@@ -224,6 +234,7 @@ public sealed class AppRepository
         command.Parameters.AddWithValue("$now", now);
         command.Parameters.AddWithValue("$dayStart", dayStart);
         command.Parameters.AddWithValue("$includeNewItems", includeNewItems ? 1 : 0);
+        command.Parameters.AddWithValue("$excludedItemIds", encodedExcludedItemIds);
         await using var reader = await command.ExecuteReaderAsync();
         if (!await reader.ReadAsync()) return null;
         return new StudyRow(

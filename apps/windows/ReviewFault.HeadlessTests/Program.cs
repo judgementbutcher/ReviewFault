@@ -48,6 +48,21 @@ try
         "a backlog-protected session does not introduce new content");
     var next = await repository.NextForReviewAsync(queueNow);
     Require(next is not null, "a new item enters today's queue");
+    var artifactsBeforeSessionSkip = await CountReviewArtifactsAsync(root);
+    var afterExcludedFirst = await repository.NextForReviewAsync(
+        queueNow, includeNewItems: true, excludedItemIds: new[] { next!.Id });
+    Require(afterExcludedFirst is not null && afterExcludedFirst.Id != next.Id,
+        "a session-local skip selects a different queue item");
+    Require(await repository.NextForReviewAsync(
+        queueNow, includeNewItems: true, excludedItemIds: all.Select(item => item.Id).ToArray()) is null,
+        "excluding every candidate ends the current session queue");
+    Require((await repository.NextForReviewAsync(queueNow))?.Id == next.Id,
+        "clearing the session exclusion makes the skipped item visible again");
+    Require(await CountReviewArtifactsAsync(root) == artifactsBeforeSessionSkip,
+        "session exclusions do not append ratings, attempts, or review events");
+    await RequireThrowsAsync<ArgumentException>(
+        () => repository.NextForReviewAsync(queueNow, true, new[] { "invalid|item" }),
+        "session exclusion rejects IDs that could break boundary matching");
     var reviewedAt = DateTimeOffset.UtcNow.ToUnixTimeSeconds();
     var result = await repository.ReviewAsync(next!, Rating.Good, reviewedAt, 30,
         next!.Kind == "math_problem" ? "effortful" : null);
@@ -161,4 +176,16 @@ static async Task RequireThrowsAsync<TException>(Func<Task> action, string messa
     catch (TException)
     {
     }
+}
+
+static async Task<int> CountReviewArtifactsAsync(string root)
+{
+    await using var connection = new Microsoft.Data.Sqlite.SqliteConnection(
+        $"Data Source={Path.Combine(root, "reviewfault.db")}");
+    await connection.OpenAsync();
+    var command = connection.CreateCommand();
+    command.CommandText = "SELECT (SELECT COUNT(*) FROM review_log) + " +
+        "(SELECT COUNT(*) FROM review_event_v2) + " +
+        "(SELECT COUNT(*) FROM review_event_v3) + (SELECT COUNT(*) FROM attempt)";
+    return Convert.ToInt32(await command.ExecuteScalarAsync());
 }

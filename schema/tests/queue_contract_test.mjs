@@ -23,7 +23,8 @@ const sources = [
       const sql = this.text.match(new RegExp(`${methodName}Async\\([\\s\\S]*?CommandText = \"\"\"([\\s\\S]*?)\"\"\"`))[1];
       return sql.replaceAll('$tomorrowStart', '?').replaceAll('$tomorrowEnd', '?')
         .replaceAll('$weekEnd', '?').replaceAll('$includeNewItems', '?')
-        .replaceAll('$now', '?').replaceAll('$dayStart', '?');
+        .replaceAll('$excludedItemIds', '?').replaceAll('$now', '?')
+        .replaceAll('$dayStart', '?');
     },
   },
 ];
@@ -62,6 +63,15 @@ function addNewMemoryReview(db, eventId, itemId) {
   `).run(eventId);
 }
 
+function encodedExcluded(...ids) {
+  return ids.length === 0 ? '' : `|${ids.sort().join('|')}|`;
+}
+
+function nextParameters(excluded, includeNewItems = 1) {
+  return [excluded, excluded, now, includeNewItems,
+    dayStart, dayStart, dayStart, dayStart];
+}
+
 for (const source of sources) {
   const db = new DatabaseSync(':memory:');
   db.exec(initial);
@@ -95,20 +105,26 @@ for (const source of sources) {
     `${source.name} dashboard exposes the seven-day load forecast`);
 
   const nextSql = source.method('nextForReview');
-  assert.equal(Object.values(db.prepare(nextSql).get(now, 1, dayStart, dayStart, dayStart, dayStart))[0], 'math-overdue',
+  assert.equal(Object.values(db.prepare(nextSql).get(...nextParameters('')))[0], 'math-overdue',
     `${source.name} must start with an overdue enabled item`);
+  assert.equal(Object.values(db.prepare(nextSql).get(
+    ...nextParameters(encodedExcluded('math-overdue'))))[0], 'memory-due',
+    `${source.name} skips an excluded first item without changing the queue order`);
+  assert.equal(db.prepare(nextSql).get(...nextParameters(
+    encodedExcluded('math-overdue', 'memory-due'), 0)), undefined,
+    `${source.name} returns no item when every due candidate is excluded for the session`);
 
   addNewMemoryReview(db, 'review-new-a', 'memory-new-a');
   addNewMemoryReview(db, 'review-new-b', 'memory-new-b');
   db.exec(`UPDATE study_item SET due_at = ${now + 1000}
     WHERE id IN ('memory-due', 'math-overdue')`);
-  assert.equal(Object.values(db.prepare(nextSql).get(now, 1, dayStart, dayStart, dayStart, dayStart))[0], 'math-new',
+  assert.equal(Object.values(db.prepare(nextSql).get(...nextParameters('')))[0], 'math-new',
     `${source.name} keeps new math available after the daily 408 limit is reached`);
-  assert.equal(db.prepare(nextSql).get(now, 0, dayStart, dayStart, dayStart, dayStart), undefined,
+  assert.equal(db.prepare(nextSql).get(...nextParameters('', 0)), undefined,
     `${source.name} freezes backlog protection for the whole focus session`);
 
   db.exec(`UPDATE learning_preferences SET include_math_problems = 0 WHERE singleton = 1`);
-  assert.equal(db.prepare(nextSql).get(now, 1, dayStart, dayStart, dayStart, dayStart), undefined,
+  assert.equal(db.prepare(nextSql).get(...nextParameters('')), undefined,
     `${source.name} applies queue-type and daily-limit preferences`);
   db.close();
 }

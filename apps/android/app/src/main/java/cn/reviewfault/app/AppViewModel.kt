@@ -41,6 +41,7 @@ data class AppUiState(
     val sessionElapsedSeconds: Int = 0,
     val sessionReviewedCount: Int = 0,
     val sessionAllowsNewItems: Boolean = true,
+    val sessionSkippedIds: Set<String> = emptySet(),
     val preferences: LearningPreferences = LearningPreferences(),
     val themeMode: Int = 0,
     val reminderEnabled: Boolean = false,
@@ -169,6 +170,7 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
                 sessionElapsedSeconds = 0,
                 sessionReviewedCount = 0,
                 sessionAllowsNewItems = current.summary.deferredDueMinutes == 0,
+                sessionSkippedIds = emptySet(),
             )
         }
         startReviewNow()
@@ -176,26 +178,61 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
 
     private fun startReviewNow(message: String? = null) {
         val session = mutableState.value
-        if (session.sessionReviewedCount > 0 &&
+        if ((session.sessionReviewedCount > 0 || session.sessionSkippedIds.isNotEmpty()) &&
             session.sessionElapsedSeconds >= session.sessionTargetSeconds) {
-            refreshTodayNow()
-            mutableState.update { it.copy(
-                destination = AppDestination.Today,
-                current = null,
-                answerRevealed = false,
-                message = "本轮完成：${it.sessionReviewedCount} 条 · ${formatMinutes(it.sessionElapsedSeconds)}",
-            ) }
+            finishReviewSessionNow()
             return
         }
         val row = database.nextForReview(
-            Instant.now().epochSecond, session.sessionAllowsNewItems,
+            Instant.now().epochSecond,
+            session.sessionAllowsNewItems,
+            session.sessionSkippedIds,
         )
-        if (row == null) refreshTodayNow()
+        if (row == null) {
+            finishReviewSessionNow(
+                if (session.sessionReviewedCount == 0 && session.sessionSkippedIds.isEmpty())
+                    "当前没有待复习内容"
+                else null,
+            )
+            return
+        }
         mutableState.update { it.copy(
-            destination = if (row == null) AppDestination.Today else AppDestination.Review,
+            destination = AppDestination.Review,
             current = row, answerRevealed = false, startedAt = Instant.now().epochSecond,
-            message = message ?: if (row == null) "当前没有待复习内容" else null,
+            message = message,
         ) }
+    }
+
+    fun skipCurrent() = io(exclusive = true) {
+        val snapshot = mutableState.value
+        val row = snapshot.current ?: return@io
+        val skippedAt = Instant.now().epochSecond
+        val durationSeconds = (skippedAt - snapshot.startedAt).toInt().coerceAtLeast(0)
+        mutableState.update { it.copy(
+            current = null,
+            answerRevealed = false,
+            sessionElapsedSeconds = it.sessionElapsedSeconds + durationSeconds,
+            sessionSkippedIds = it.sessionSkippedIds + row.id,
+        ) }
+        startReviewNow("已跳过；本轮不会再次出现，也没有生成评分")
+    }
+
+    fun finishReviewSession() = io(exclusive = true) {
+        finishReviewSessionNow()
+    }
+
+    private fun finishReviewSessionNow(overrideMessage: String? = null) {
+        refreshTodayNow()
+        mutableState.update { current ->
+            val summary = "本轮结束：完成 ${current.sessionReviewedCount} 条 · " +
+                "跳过 ${current.sessionSkippedIds.size} 条 · ${formatMinutes(current.sessionElapsedSeconds)}"
+            current.copy(
+                destination = AppDestination.Today,
+                current = null,
+                answerRevealed = false,
+                message = overrideMessage ?: summary,
+            )
+        }
     }
 
     fun revealAnswer() = mutableState.update { it.copy(answerRevealed = true) }

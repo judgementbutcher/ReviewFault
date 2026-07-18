@@ -191,7 +191,16 @@ class AppDatabase private constructor(context: Context) :
         }
     }
 
-    fun nextForReview(now: Long, includeNewItems: Boolean = true): StudyRow? {
+    fun nextForReview(
+        now: Long,
+        includeNewItems: Boolean = true,
+        excludedItemIds: Set<String> = emptySet(),
+    ): StudyRow? {
+        require(excludedItemIds.none { it.isEmpty() || '|' in it }) {
+            "会话排除项包含非法 ID"
+        }
+        val encodedExcludedItemIds = if (excludedItemIds.isEmpty()) "" else
+            excludedItemIds.sorted().joinToString(separator = "|", prefix = "|", postfix = "|")
         val dayStart = ZonedDateTime.ofInstant(Instant.ofEpochSecond(now), ZoneId.systemDefault())
             .toLocalDate().atStartOfDay(ZoneId.systemDefault()).toEpochSecond()
         readableDatabase.rawQuery(
@@ -214,6 +223,7 @@ class AppDatabase private constructor(context: Context) :
             CROSS JOIN learning_preferences lp
             WHERE s.suspended_at IS NULL AND s.deleted_at IS NULL
               AND lp.singleton = 1
+              AND (? = '' OR instr(?, '|' || s.id || '|') = 0)
               AND ((s.kind = 'math_problem' AND lp.include_math_problems = 1) OR
                 (s.kind = 'memory_card' AND lp.include_memory_cards = 1 AND (
                   (s.subject = 'data_structures' AND lp.enable_data_structures = 1) OR
@@ -246,7 +256,8 @@ class AppDatabase private constructor(context: Context) :
               s.created_at
             LIMIT 1
             """.trimIndent(),
-            arrayOf(now.toString(), includeNewItems.toInt().toString(),
+            arrayOf(encodedExcludedItemIds, encodedExcludedItemIds,
+                now.toString(), includeNewItems.toInt().toString(),
                 dayStart.toString(), dayStart.toString(),
                 dayStart.toString(), dayStart.toString()),
         ).use { cursor ->

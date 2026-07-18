@@ -27,10 +27,14 @@ for (const platform of platforms) {
     'math_schedule_state', 'deleted_at', 'include_memory_cards',
     'include_math_problems', 'daily_new_memory_limit',
     'review_event_v3', 'algorithm_parameter_registry', 'scheduler_generation',
+    'excludedItemIds',
   ]) {
     assert(repository.includes(token), `${platform.name} repository is missing ${token}`);
   }
-  for (const token of ['搜索', '数学', '408', '备份', '恢复', '答案', '设置', '回收站']) {
+  for (const token of [
+    '搜索', '数学', '408', '备份', '恢复', '答案', '设置', '回收站',
+    '本轮跳过', '提前结束本轮',
+  ]) {
     assert(ui.includes(token), `${platform.name} UI is missing ${token}`);
   }
   for (const token of ['abi', 'review']) {

@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import { readFileSync, readdirSync } from 'node:fs';
 
-const version = '0.3.1';
+const version = '0.3.2';
 const read = (relative) => readFileSync(new URL(relative, import.meta.url), 'utf8');
 
 const contracts = [
