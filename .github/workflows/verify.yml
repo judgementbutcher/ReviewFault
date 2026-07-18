@@ -1,7 +1,7 @@
 name: verify
 
 env:
-  APP_VERSION: 0.2.2
+  APP_VERSION: 0.2.3
 
 on:
   push:
@@ -68,4 +68,37 @@ jobs:
         with:
           dotnet-version: 8.0.x
       - uses: microsoft/setup-msbuild@v2
-      - run: msbuild apps/windows/ReviewFault/ReviewFault.csproj -restore -p:Platform=x64
+      - name: Publish self-contained Windows application
+        shell: pwsh
+        run: |
+          $publishDir = Join-Path $env:GITHUB_WORKSPACE "artifacts\windows\publish"
+          dotnet publish apps/windows/ReviewFault/ReviewFault.csproj `
+            -p:PublishProfile=win-x64 -p:Configuration=Release -p:Platform=x64 `
+            -p:SelfContained=true -p:WindowsAppSDKSelfContained=true `
+            -p:PublishDir="$publishDir"
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          @("ReviewFault.exe", "reviewfault_core.dll", "Microsoft.WindowsAppRuntime.dll", "Microsoft.ui.xaml.dll") |
+            ForEach-Object {
+              if (-not (Test-Path (Join-Path $publishDir $_))) {
+                throw "Self-contained Windows publish is missing $_"
+              }
+            }
+      - name: Build and smoke-test MSI
+        shell: pwsh
+        run: |
+          $publishDir = Join-Path $env:GITHUB_WORKSPACE "artifacts\windows\publish"
+          $installerDir = Join-Path $env:GITHUB_WORKSPACE "artifacts\windows\installer"
+          dotnet build apps/windows/ReviewFault.Installer/ReviewFault.Installer.wixproj `
+            -c Release -p:ProductVersion=$env:APP_VERSION `
+            -p:PublishDir="$publishDir" -p:OutputPath="$installerDir"
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          $msi = Join-Path $installerDir "ReviewFault-windows-v$env:APP_VERSION-x64.msi"
+          if (-not (Test-Path $msi)) { throw "MSI was not generated: $msi" }
+          $installLog = Join-Path $env:RUNNER_TEMP "reviewfault-msi-install.log"
+          $install = Start-Process msiexec.exe -ArgumentList "/i `"$msi`" /qn /norestart /l*v `"$installLog`"" -Wait -PassThru
+          if ($install.ExitCode -ne 0) { Get-Content $installLog; exit $install.ExitCode }
+          $installedExe = Join-Path $env:ProgramFiles "ReviewFault\ReviewFault.exe"
+          if (-not (Test-Path $installedExe)) { throw "Installed executable is missing: $installedExe" }
+          $uninstallLog = Join-Path $env:RUNNER_TEMP "reviewfault-msi-uninstall.log"
+          $uninstall = Start-Process msiexec.exe -ArgumentList "/x `"$msi`" /qn /norestart /l*v `"$uninstallLog`"" -Wait -PassThru
+          if ($uninstall.ExitCode -ne 0) { Get-Content $uninstallLog; exit $uninstall.ExitCode }

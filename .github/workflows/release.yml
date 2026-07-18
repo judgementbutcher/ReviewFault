@@ -1,7 +1,7 @@
 name: release
 
 env:
-  APP_VERSION: 0.2.2
+  APP_VERSION: 0.2.3
 
 on:
   push:
@@ -90,13 +90,49 @@ jobs:
         with:
           dotnet-version: 8.0.x
       - uses: microsoft/setup-msbuild@v2
-      - run: msbuild apps/windows/ReviewFault/ReviewFault.csproj -restore -p:Platform=x64 -p:Configuration=Release
-      - shell: pwsh
-        run: Compress-Archive -Path apps/windows/ReviewFault/bin/x64/Release/* -DestinationPath ReviewFault-windows-v${{ env.APP_VERSION }}-x64.zip
+      - name: Publish self-contained Windows application
+        shell: pwsh
+        run: |
+          $publishDir = Join-Path $env:GITHUB_WORKSPACE "artifacts\windows\publish"
+          dotnet publish apps/windows/ReviewFault/ReviewFault.csproj `
+            -p:PublishProfile=win-x64 -p:Configuration=Release -p:Platform=x64 `
+            -p:SelfContained=true -p:WindowsAppSDKSelfContained=true `
+            -p:PublishDir="$publishDir"
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          @("ReviewFault.exe", "reviewfault_core.dll", "Microsoft.WindowsAppRuntime.dll", "Microsoft.ui.xaml.dll") |
+            ForEach-Object {
+              if (-not (Test-Path (Join-Path $publishDir $_))) {
+                throw "Self-contained Windows publish is missing $_"
+              }
+            }
+          Compress-Archive -Path "$publishDir\*" `
+            -DestinationPath "ReviewFault-windows-v$env:APP_VERSION-x64.zip"
+      - name: Build and smoke-test MSI
+        shell: pwsh
+        run: |
+          $publishDir = Join-Path $env:GITHUB_WORKSPACE "artifacts\windows\publish"
+          $installerDir = Join-Path $env:GITHUB_WORKSPACE "artifacts\windows\installer"
+          dotnet build apps/windows/ReviewFault.Installer/ReviewFault.Installer.wixproj `
+            -c Release -p:ProductVersion=$env:APP_VERSION `
+            -p:PublishDir="$publishDir" -p:OutputPath="$installerDir"
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          $msi = Join-Path $installerDir "ReviewFault-windows-v$env:APP_VERSION-x64.msi"
+          if (-not (Test-Path $msi)) { throw "MSI was not generated: $msi" }
+          Copy-Item $msi .
+          $installLog = Join-Path $env:RUNNER_TEMP "reviewfault-msi-install.log"
+          $install = Start-Process msiexec.exe -ArgumentList "/i `"$msi`" /qn /norestart /l*v `"$installLog`"" -Wait -PassThru
+          if ($install.ExitCode -ne 0) { Get-Content $installLog; exit $install.ExitCode }
+          $installedExe = Join-Path $env:ProgramFiles "ReviewFault\ReviewFault.exe"
+          if (-not (Test-Path $installedExe)) { throw "Installed executable is missing: $installedExe" }
+          $uninstallLog = Join-Path $env:RUNNER_TEMP "reviewfault-msi-uninstall.log"
+          $uninstall = Start-Process msiexec.exe -ArgumentList "/x `"$msi`" /qn /norestart /l*v `"$uninstallLog`"" -Wait -PassThru
+          if ($uninstall.ExitCode -ne 0) { Get-Content $uninstallLog; exit $uninstall.ExitCode }
       - uses: actions/upload-artifact@v4
         with:
           name: windows-release
-          path: ReviewFault-windows-v${{ env.APP_VERSION }}-x64.zip
+          path: |
+            ReviewFault-windows-v${{ env.APP_VERSION }}-x64.msi
+            ReviewFault-windows-v${{ env.APP_VERSION }}-x64.zip
 
   publish:
     needs: [core, android, windows]
@@ -107,12 +143,16 @@ jobs:
         with:
           pattern: '*-release'
           merge-multiple: true
-      - run: sha256sum "ReviewFault-android-v${APP_VERSION}.apk" "ReviewFault-windows-v${APP_VERSION}-x64.zip" > SHA256SUMS
+      - run: >-
+          sha256sum "ReviewFault-android-v${APP_VERSION}.apk"
+          "ReviewFault-windows-v${APP_VERSION}-x64.msi"
+          "ReviewFault-windows-v${APP_VERSION}-x64.zip" > SHA256SUMS
       - uses: softprops/action-gh-release@v2
         with:
           name: ReviewFault v${{ env.APP_VERSION }}
-          body_path: docs/release-v0.2.2.md
+          body_path: docs/release-v0.2.3.md
           files: |
             ReviewFault-android-v${{ env.APP_VERSION }}.apk
+            ReviewFault-windows-v${{ env.APP_VERSION }}-x64.msi
             ReviewFault-windows-v${{ env.APP_VERSION }}-x64.zip
             SHA256SUMS

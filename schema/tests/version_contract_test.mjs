@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import { readFileSync, readdirSync } from 'node:fs';
 
-const version = '0.2.2';
+const version = '0.2.3';
 const read = (relative) => readFileSync(new URL(relative, import.meta.url), 'utf8');
 
 const contracts = [
@@ -37,5 +37,22 @@ assert(release.includes('needs: [core, android, windows]'),
   'release workflow must be gated on both supported platform builds');
 assert(release.includes('test "$GITHUB_REF_NAME" = "v$APP_VERSION"'),
   'release tag must match application metadata');
+assert(release.includes('WindowsAppSDKSelfContained=true') &&
+  release.includes('ReviewFault.Installer.wixproj'),
+  'Windows release must be self-contained and build the MSI installer');
+assert(release.includes('ReviewFault-windows-v${{ env.APP_VERSION }}-x64.msi'),
+  'Windows MSI must be attached to the release');
+
+const publishProfile = read('../../apps/windows/ReviewFault/Properties/PublishProfiles/win-x64.pubxml');
+assert(publishProfile.includes('<SelfContained>true</SelfContained>') &&
+  publishProfile.includes('<WindowsAppSDKSelfContained>true</WindowsAppSDKSelfContained>'),
+  'Windows publish profile must include .NET and Windows App SDK runtimes');
+const windowsProject = read('../../apps/windows/ReviewFault/ReviewFault.csproj');
+assert(windowsProject.includes('ResolvedFileToPublish') &&
+  windowsProject.includes('<RelativePath>reviewfault_core.dll</RelativePath>'),
+  'Windows publish must include the native scheduler DLL');
+const installer = read('../../apps/windows/ReviewFault.Installer/Package.wxs');
+assert(installer.includes('WixUI_InstallDir') && installer.includes('MajorUpgrade'),
+  'Windows MSI must provide guided installation and upgrade support');
 
 console.log(`Version ${version} contract tests passed`);

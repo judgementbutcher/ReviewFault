@@ -1,0 +1,60 @@
+<Wix xmlns="http://wixtoolset.org/schemas/v4/wxs"
+     xmlns:ui="http://wixtoolset.org/schemas/v4/wxs/ui">
+  <Package Name="ReviewFault"
+           Manufacturer="ReviewFault"
+           Language="1033"
+           Version="$(var.ProductVersion)"
+           UpgradeCode="58B8BD8D-DB44-4B93-A12D-FB37170A9F1E"
+           Scope="perMachine"
+           InstallerVersion="500"
+           Compressed="yes">
+    <MajorUpgrade DowngradeErrorMessage="A newer version of ReviewFault is already installed." />
+    <MediaTemplate EmbedCab="yes" CompressionLevel="high" />
+
+    <Property Id="ARPURLINFOABOUT" Value="https://github.com/judgementbutcher/ReviewFault" />
+    <Property Id="ARPHELPLINK" Value="https://github.com/judgementbutcher/ReviewFault/issues" />
+    <SetProperty Id="ARPINSTALLLOCATION" Value="[INSTALLFOLDER]" After="CostFinalize" />
+
+    <Feature Id="Complete" Title="ReviewFault" Level="1">
+      <ComponentGroupRef Id="PublishedApplication" />
+    </Feature>
+
+    <ui:WixUI Id="WixUI_InstallDir"
+              InstallDirectory="INSTALLFOLDER"
+              ExtendedPathValidation="yes" />
+  </Package>
+
+  <Fragment>
+    <StandardDirectory Id="ProgramFiles64Folder">
+      <Directory Id="INSTALLFOLDER" Name="ReviewFault" />
+    </StandardDirectory>
+    <StandardDirectory Id="ProgramMenuFolder">
+      <Directory Id="ApplicationProgramsFolder" Name="ReviewFault" />
+    </StandardDirectory>
+  </Fragment>
+
+  <Fragment>
+    <ComponentGroup Id="PublishedApplication" Directory="INSTALLFOLDER">
+      <Component Id="MainExecutable" Guid="C1E46A0D-2D53-4E1A-AB75-E5B36AF79491">
+        <File Id="ReviewFaultExecutable"
+              Source="!(bindpath.PublishDir)\ReviewFault.exe"
+              KeyPath="yes">
+          <Shortcut Id="StartMenuShortcut"
+                    Directory="ApplicationProgramsFolder"
+                    Name="ReviewFault"
+                    Description="Local-first spaced learning application"
+                    WorkingDirectory="INSTALLFOLDER"
+                    Advertise="yes" />
+        </File>
+        <RemoveFolder Id="RemoveApplicationProgramsFolder"
+                      Directory="ApplicationProgramsFolder"
+                      On="uninstall" />
+      </Component>
+
+      <Files Include="!(bindpath.PublishDir)\**">
+        <Exclude Files="!(bindpath.PublishDir)\ReviewFault.exe" />
+        <Exclude Files="!(bindpath.PublishDir)\**\*.pdb" />
+      </Files>
+    </ComponentGroup>
+  </Fragment>
+</Wix>

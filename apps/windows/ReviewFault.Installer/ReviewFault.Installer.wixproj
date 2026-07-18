@@ -1,0 +1,23 @@
+<Project Sdk="WixToolset.Sdk/6.0.2">
+  <PropertyGroup>
+    <InstallerPlatform>x64</InstallerPlatform>
+    <ProductVersion Condition="'$(ProductVersion)' == ''">0.2.3</ProductVersion>
+    <PublishDir Condition="'$(PublishDir)' == ''">$(MSBuildThisFileDirectory)..\ReviewFault\bin\x64\Release\net8.0-windows10.0.19041.0\win-x64\publish</PublishDir>
+    <OutputName>ReviewFault-windows-v$(ProductVersion)-x64</OutputName>
+    <DefineConstants>$(DefineConstants);ProductVersion=$(ProductVersion)</DefineConstants>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <BindPath BindName="PublishDir" Include="$(PublishDir)" />
+    <PackageReference Include="WixToolset.UI.wixext" Version="6.0.2" />
+  </ItemGroup>
+
+  <Target Name="ValidatePublishedApplication" BeforeTargets="BeforeBuild">
+    <Error Condition="!Exists('$(PublishDir)\ReviewFault.exe')"
+           Text="Publish ReviewFault for win-x64 before building the MSI. Missing $(PublishDir)\ReviewFault.exe" />
+    <Error Condition="!Exists('$(PublishDir)\reviewfault_core.dll')"
+           Text="The native scheduler DLL is missing from the Windows publish directory." />
+    <Error Condition="!Exists('$(PublishDir)\Microsoft.WindowsAppRuntime.dll')"
+           Text="The Windows App SDK self-contained runtime is missing from the publish directory." />
+  </Target>
+</Project>

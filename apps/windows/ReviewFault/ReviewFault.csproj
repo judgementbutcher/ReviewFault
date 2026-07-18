@@ -11,7 +11,7 @@
     <WindowsPackageType>None</WindowsPackageType>
     <Nullable>enable</Nullable>
     <ImplicitUsings>enable</ImplicitUsings>
-    <Version>0.2.2</Version>
+    <Version>0.2.3</Version>
     <ReviewFaultRoot>$([System.IO.Path]::GetFullPath('$(MSBuildProjectDirectory)\..\..\..'))</ReviewFaultRoot>
     <NativeBuildDir>$(BaseIntermediateOutputPath)native</NativeBuildDir>
   </PropertyGroup>
@@ -27,10 +27,32 @@
              CopyToOutputDirectory="PreserveNewest" />
   </ItemGroup>
 
+  <Target Name="ValidateWindowsReleaseDeployment"
+          BeforeTargets="Publish"
+          Condition="'$(Configuration)' == 'Release' and '$(RuntimeIdentifier)' != ''">
+    <Error Condition="'$(SelfContained)' != 'true'"
+           Text="Windows release publishing must be .NET self-contained." />
+    <Error Condition="'$(WindowsAppSDKSelfContained)' != 'true'"
+           Text="Windows release publishing must include the Windows App SDK runtime." />
+    <Error Condition="'$(PublishSingleFile)' == 'true'"
+           Text="Windows App SDK release publishing must remain a multi-file deployment." />
+  </Target>
+
   <Target Name="BuildReviewFaultNative" BeforeTargets="Build" Condition="'$(SkipNativeBuild)' != 'true'">
     <Exec Command="cmake -S &quot;$(ReviewFaultRoot)&quot; -B &quot;$(NativeBuildDir)&quot; -DBUILD_SHARED_LIBS=ON -DREVIEWFAULT_BUILD_TESTS=OFF -A $(Platform)" />
     <Exec Command="cmake --build &quot;$(NativeBuildDir)&quot; --config $(Configuration)" />
     <Copy SourceFiles="$(NativeBuildDir)\$(Configuration)\reviewfault_core.dll"
           DestinationFolder="$(OutDir)" />
+  </Target>
+
+  <Target Name="IncludeReviewFaultNativeInPublish"
+          AfterTargets="ComputeFilesToPublish"
+          Condition="'$(SkipNativeBuild)' != 'true'">
+    <ItemGroup>
+      <ResolvedFileToPublish Include="$(OutDir)reviewfault_core.dll">
+        <RelativePath>reviewfault_core.dll</RelativePath>
+        <CopyToPublishDirectory>PreserveNewest</CopyToPublishDirectory>
+      </ResolvedFileToPublish>
+    </ItemGroup>
   </Target>
 </Project>

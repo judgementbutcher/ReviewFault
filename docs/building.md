@@ -29,7 +29,7 @@ cd apps/android
 需要仓库 secrets：`ANDROID_KEYSTORE_BASE64`、`ANDROID_KEYSTORE_PASSWORD`、
 `ANDROID_KEY_ALIAS`、`ANDROID_KEY_PASSWORD`、`ANDROID_CERT_SHA256`。其中第一个值是
 JKS/PKCS12 文件的 base64 内容，最后一个值是证书 SHA-256 指纹（小写且不含冒号）；
-私钥本身不得提交到仓库。配置完成后，`v0.2.2` tag 会构建并校验
+私钥本身不得提交到仓库。配置完成后，`v0.2.3` tag 会构建并校验
 `assembleRelease`，生成可覆盖升级的正式 APK。
 
 ## Windows
@@ -56,6 +56,21 @@ dotnet msbuild apps/windows/ReviewFault/ReviewFault.csproj -t:Compile \
   -p:AppxGeneratePriEnabled=false -p:AppxGeneratePrisForPortableLibrariesEnabled=false \
   -p:AppxGetPackagePropertiesEnabled=false -p:IncludeProjectPriFile=false
 ```
+
+正式 Windows 产物必须使用自包含发布配置，不能直接压缩普通 `build` 输出：
+
+```powershell
+dotnet publish apps/windows/ReviewFault/ReviewFault.csproj `
+  -p:PublishProfile=win-x64 -p:Platform=x64 `
+  -p:SelfContained=true -p:WindowsAppSDKSelfContained=true
+
+dotnet build apps/windows/ReviewFault.Installer/ReviewFault.Installer.wixproj `
+  -c Release -p:ProductVersion=0.2.3
+```
+
+第一个命令同时携带 .NET 8 与 Windows App SDK 运行时，修复干净系统启动时要求另行安装
+Windows App Runtime 的问题；第二个命令使用该发布目录生成带安装路径选择、开始菜单快捷方式、
+升级与卸载支持的 x64 MSI。CI 会在 Windows runner 上静默安装、检查文件并卸载，之后才允许发布。
 
 ## 跨端门禁
 
