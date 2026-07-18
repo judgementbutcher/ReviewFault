@@ -54,5 +54,8 @@ assert(windowsProject.includes('ResolvedFileToPublish') &&
 const installer = read('../../apps/windows/ReviewFault.Installer/Package.wxs');
 assert(installer.includes('WixUI_InstallDir') && installer.includes('MajorUpgrade'),
   'Windows MSI must provide guided installation and upgrade support');
+const installerProject = read('../../apps/windows/ReviewFault.Installer/ReviewFault.Installer.wixproj');
+assert(installerProject.includes('<SuppressIces>ICE03</SuppressIces>'),
+  'Windows MSI must suppress only the known Windows App SDK ICE03 metadata false positive');
 
 console.log(`Version ${version} contract tests passed`);

@@ -5,6 +5,9 @@
     <PublishDir Condition="'$(PublishDir)' == ''">$(MSBuildThisFileDirectory)..\ReviewFault\bin\x64\Release\net8.0-windows10.0.19041.0\win-x64\publish</PublishDir>
     <OutputName>ReviewFault-windows-v$(ProductVersion)-x64</OutputName>
     <DefineConstants>$(DefineConstants);ProductVersion=$(ProductVersion)</DefineConstants>
+    <!-- Windows App SDK resource DLLs expose language metadata that ICE03
+         misparses. Keep every other Windows Installer validation enabled. -->
+    <SuppressIces>ICE03</SuppressIces>
   </PropertyGroup>
 
   <ItemGroup>

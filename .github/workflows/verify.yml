@@ -99,15 +99,38 @@ jobs:
           $installerDir = Join-Path $env:GITHUB_WORKSPACE "artifacts\windows\installer"
           dotnet build apps/windows/ReviewFault.Installer/ReviewFault.Installer.wixproj `
             -c Release -p:ProductVersion=$env:APP_VERSION `
-            -p:PublishDir="$publishDir" -p:OutputPath="$installerDir"
-          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+            -p:PublishDir="$publishDir" -p:OutputPath="$installerDir" `
+            2>&1 | Tee-Object -FilePath windows-msi-build.log
+          $msiBuildExit = $LASTEXITCODE
+          if ($msiBuildExit -ne 0) {
+            Get-Content windows-msi-build.log | Select-String -Pattern 'error|failed|exception|ICE[0-9]+' |
+              ForEach-Object {
+                $line = $_.Line.Replace('%', '%25').Replace("`r", '%0D').Replace("`n", '%0A')
+                Write-Output "::error title=Windows MSI build::$line"
+              }
+            exit $msiBuildExit
+          }
           $msi = Join-Path $installerDir "ReviewFault-windows-v$env:APP_VERSION-x64.msi"
-          if (-not (Test-Path $msi)) { throw "MSI was not generated: $msi" }
+          if (-not (Test-Path $msi)) {
+            Write-Output "::error title=Windows MSI build::MSI was not generated: $msi"
+            exit 1
+          }
           $installLog = Join-Path $env:RUNNER_TEMP "reviewfault-msi-install.log"
           $install = Start-Process msiexec.exe -ArgumentList "/i `"$msi`" /qn /norestart /l*v `"$installLog`"" -Wait -PassThru
-          if ($install.ExitCode -ne 0) { Get-Content $installLog; exit $install.ExitCode }
+          if ($install.ExitCode -ne 0) {
+            Write-Output "::error title=Windows MSI install::msiexec exited with $($install.ExitCode)"
+            Get-Content $installLog
+            exit $install.ExitCode
+          }
           $installedExe = Join-Path $env:ProgramFiles "ReviewFault\ReviewFault.exe"
-          if (-not (Test-Path $installedExe)) { throw "Installed executable is missing: $installedExe" }
+          if (-not (Test-Path $installedExe)) {
+            Write-Output "::error title=Windows MSI install::Installed executable is missing: $installedExe"
+            exit 1
+          }
           $uninstallLog = Join-Path $env:RUNNER_TEMP "reviewfault-msi-uninstall.log"
           $uninstall = Start-Process msiexec.exe -ArgumentList "/x `"$msi`" /qn /norestart /l*v `"$uninstallLog`"" -Wait -PassThru
-          if ($uninstall.ExitCode -ne 0) { Get-Content $uninstallLog; exit $uninstall.ExitCode }
+          if ($uninstall.ExitCode -ne 0) {
+            Write-Output "::error title=Windows MSI uninstall::msiexec exited with $($uninstall.ExitCode)"
+            Get-Content $uninstallLog
+            exit $uninstall.ExitCode
+          }
