@@ -97,12 +97,21 @@ jobs:
           dotnet publish apps/windows/ReviewFault/ReviewFault.csproj `
             -p:PublishProfile=win-x64 -p:Configuration=Release -p:Platform=x64 `
             -p:SelfContained=true -p:WindowsAppSDKSelfContained=true `
-            -p:PublishDir="$publishDir"
-          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+            -p:PublishDir="$publishDir" 2>&1 | Tee-Object -FilePath windows-publish.log
+          $publishExit = $LASTEXITCODE
+          if ($publishExit -ne 0) {
+            Get-Content windows-publish.log | Select-String -Pattern 'error|failed|exception' |
+              ForEach-Object {
+                $line = $_.Line.Replace('%', '%25').Replace("`r", '%0D').Replace("`n", '%0A')
+                Write-Output "::error title=Windows self-contained publish::$line"
+              }
+            exit $publishExit
+          }
           @("ReviewFault.exe", "reviewfault_core.dll", "Microsoft.WindowsAppRuntime.dll", "Microsoft.ui.xaml.dll") |
             ForEach-Object {
               if (-not (Test-Path (Join-Path $publishDir $_))) {
-                throw "Self-contained Windows publish is missing $_"
+                Write-Output "::error title=Windows self-contained payload::Missing $_ from $publishDir"
+                exit 1
               }
             }
           Compress-Archive -Path "$publishDir\*" `
