@@ -48,6 +48,9 @@ data class DashboardSummary(
     val dueToday: Int,
     val newItems: Int,
     val estimatedMinutes: Int,
+    val deferredDueMinutes: Int = 0,
+    val tomorrowDue: Int = 0,
+    val nextSevenDaysDue: Int = 0,
 )
 
 data class LearningPreferences(
@@ -137,6 +140,11 @@ class AppDatabase private constructor(context: Context) :
                (SELECT COUNT(*) FROM review_event_v3 e
                 JOIN memory_review_event_v3 mr ON mr.review_event_id = e.id
                 WHERE mr.state_before = 0 AND e.reviewed_at >= ?))
+              , lp.session_minutes,
+              COALESCE(SUM(CASE WHEN s.scheduler_state <> 0
+                AND s.due_at >= ? AND s.due_at < ? THEN 1 ELSE 0 END), 0),
+              COALESCE(SUM(CASE WHEN s.scheduler_state <> 0
+                AND s.due_at > ? AND s.due_at <= ? THEN 1 ELSE 0 END), 0)
             FROM learning_preferences lp
             LEFT JOIN study_item s ON s.suspended_at IS NULL AND s.deleted_at IS NULL AND (
               (s.kind = 'math_problem' AND lp.include_math_problems = 1) OR
@@ -148,22 +156,42 @@ class AppDatabase private constructor(context: Context) :
             WHERE lp.singleton = 1
             """.trimIndent(),
             arrayOf(dayStart.toString(), dayStart.toString(), now.toString(), now.toString(),
-                dayStart.toString(), dayStart.toString()),
+                dayStart.toString(), dayStart.toString(),
+                (dayStart + 86_400).toString(), (dayStart + 2 * 86_400).toString(),
+                now.toString(), (now + 7 * 86_400).toString()),
         ).use { cursor ->
             cursor.moveToFirst()
             val remainingNewMemory = (cursor.getInt(5) - cursor.getInt(6)).coerceAtLeast(0)
-            val newMemory = cursor.intOrZero(2).coerceAtMost(remainingNewMemory)
-            val newMath = cursor.intOrZero(3)
+            val dueSeconds = cursor.intOrZero(4)
+            val budgetSeconds = cursor.intOrZero(7) * 60
+            var remainingSeconds = (budgetSeconds - dueSeconds).coerceAtLeast(0)
+            var newMemory = 0
+            var newMath = 0
+            if (dueSeconds <= budgetSeconds) {
+                newMemory = cursor.intOrZero(2).coerceAtMost(remainingNewMemory)
+                    .coerceAtMost(remainingSeconds / 45)
+                remainingSeconds -= newMemory * 45
+                newMath = cursor.intOrZero(3).coerceAtMost(remainingSeconds / 480)
+            }
+            if (dueSeconds == 0 && newMemory == 0 && newMath == 0) {
+                if (cursor.intOrZero(2) > 0 && remainingNewMemory > 0) newMemory = 1
+                else if (cursor.intOrZero(3) > 0) newMath = 1
+            }
+            val focusSeconds = dueSeconds.coerceAtMost(budgetSeconds) +
+                newMemory * 45 + newMath * 480
             return DashboardSummary(
                 cursor.intOrZero(0),
                 cursor.intOrZero(1),
                 newMemory + newMath,
-                (cursor.intOrZero(4) + newMemory * 45 + newMath * 480 + 59) / 60,
+                (focusSeconds + 59) / 60,
+                ((dueSeconds - budgetSeconds).coerceAtLeast(0) + 59) / 60,
+                cursor.intOrZero(8),
+                cursor.intOrZero(9),
             )
         }
     }
 
-    fun nextForReview(now: Long): StudyRow? {
+    fun nextForReview(now: Long, includeNewItems: Boolean = true): StudyRow? {
         val dayStart = ZonedDateTime.ofInstant(Instant.ofEpochSecond(now), ZoneId.systemDefault())
             .toLocalDate().atStartOfDay(ZoneId.systemDefault()).toEpochSecond()
         readableDatabase.rawQuery(
@@ -193,7 +221,7 @@ class AppDatabase private constructor(context: Context) :
                   (s.subject = 'operating_systems' AND lp.enable_operating_systems = 1) OR
                   (s.subject = 'computer_networks' AND lp.enable_computer_networks = 1))))
               AND ((s.scheduler_state <> 0 AND s.due_at <= ?)
-                OR (s.scheduler_state = 0 AND (s.kind = 'math_problem' OR (
+                OR (? = 1 AND s.scheduler_state = 0 AND (s.kind = 'math_problem' OR (
                   SELECT
                     (SELECT COUNT(*) FROM review_event_v2 e
                      JOIN memory_review_event_v2 mr ON mr.review_event_id = e.id
@@ -218,7 +246,8 @@ class AppDatabase private constructor(context: Context) :
               s.created_at
             LIMIT 1
             """.trimIndent(),
-            arrayOf(now.toString(), dayStart.toString(), dayStart.toString(),
+            arrayOf(now.toString(), includeNewItems.toInt().toString(),
+                dayStart.toString(), dayStart.toString(),
                 dayStart.toString(), dayStart.toString()),
         ).use { cursor ->
             return if (cursor.moveToFirst()) cursor.toStudyRow() else null

@@ -2,7 +2,7 @@
 
 ReviewFault 是面向考研数学与 408 的本地优先间隔学习软件。它不是把两类内容都压成普通闪卡：数学侧强调低摩擦记录、重做与错因复盘；408 侧强调主动回忆、分层提示与知识点关联。
 
-当前版本为 **0.3.0**（schema v3、调度 ABI v3、备份协议 v3），包含共享核心和两个原生客户端：
+当前版本为 **0.3.1**（schema v3、调度 ABI v3、备份协议 v3），包含共享核心和两个原生客户端：
 
 - Android：Kotlin + Jetpack Compose
 - Windows：C# + WinUI 3
@@ -30,7 +30,7 @@ Android 调试 APK 在完成 Android 构建后位于 `apps/android/app/build/out
 - [需求验证矩阵](docs/verification.md)
 - [视觉与无障碍 token](docs/design-tokens.md)
 - [v0.2 调度回放基线](docs/baseline-v0.2.md)
-- [v0.3.0 发布说明](docs/release-v0.3.0.md)
+- [v0.3.1 发布说明](docs/release-v0.3.1.md)
 
 `fixtures/scheduler_v1.tsv` 保留用于历史重放；`fixtures/memory_scheduler_v2.tsv` 与
 `fixtures/math_scheduler_v2.tsv` 保留冻结的 v2 黄金样例；`fixtures/*_scheduler_v3.tsv`
@@ -52,5 +52,7 @@ Android 调试 APK 在完成 Android 构建后位于 `apps/android/app/build/out
 - schema/备份/C ABI v3，同时继续恢复 v1/v2 备份并保留 v1/v2 回放入口；
 - 408 小样本保护、逾期与连续遗忘保护，数学错因分流、连续失败优先和长期熟练延长；
 - 可逆的“使用 v0.3 调度/继续 v0.2 参数”开关，切换不改写历史事件。
+- 带积压保护的专注轮次：时间预算装不下到期复习时暂停引入新内容；
+- 首页展示本轮预计时长、剩余到期负载以及明日/未来 7 天学习压力。
 
 仍不纳入 v0.3：永久清除、图示遮挡编辑器、OCR、云同步和跨设备自动同步。个人参数只在本地历史达到 200 条且回放校准误差至少改善 0.01 时启用；数据不足时继续使用冻结默认参数。

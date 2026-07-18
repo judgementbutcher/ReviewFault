@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import { readFileSync, readdirSync } from 'node:fs';
 
-const version = '0.3.0';
+const version = '0.3.1';
 const read = (relative) => readFileSync(new URL(relative, import.meta.url), 'utf8');
 
 const contracts = [
@@ -37,6 +37,8 @@ assert(release.includes('needs: [core, android, windows]'),
   'release workflow must be gated on both supported platform builds');
 assert(release.includes('test "$GITHUB_REF_NAME" = "v$APP_VERSION"'),
   'release tag must match application metadata');
+assert(release.includes(`body_path: docs/release-v${version}.md`),
+  'GitHub release must use the current version notes');
 assert(release.includes('WindowsAppSDKSelfContained=true') &&
   release.includes('ReviewFault.Installer.wixproj'),
   'Windows release must be self-contained and build the MSI installer');

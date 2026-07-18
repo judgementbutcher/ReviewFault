@@ -121,6 +121,8 @@ void test_queue_order_and_sections() {
          "a zero 408 limit still leaves new math available");
   expect(no_new_memory.omitted_new_count == 1,
          "a memory card omitted by the daily limit is reported");
+  expect(no_new_memory.deferred_estimated_seconds == 45,
+         "the queue reports estimated time for daily-limit deferrals");
 }
 
 void test_queue_time_budget() {
@@ -137,6 +139,60 @@ void test_queue_time_budget() {
   const auto tiny = plan_queue({candidates.back()}, {now, now - 1000, 0, 10});
   expect(tiny.items.size() == 1,
          "a non-empty queue always offers at least one item even over budget");
+
+  const std::vector<QueueCandidate> protected_candidates = {
+      {"due-card", StudyKind::MemoryCard, CardState::Review, now - 1, 45, false},
+      {"due-math", StudyKind::MathProblem, CardState::Review, now, 600, false},
+      {"new-card", StudyKind::MemoryCard, CardState::New, 0, 45, false},
+  };
+  const auto protected_plan =
+      plan_queue(protected_candidates, {now, now - 1000, 20, 300});
+  expect(protected_plan.items.size() == 1 &&
+             protected_plan.items.front().item.id == "due-card" &&
+             protected_plan.omitted_due_count == 1 &&
+             protected_plan.omitted_new_count == 1 &&
+             protected_plan.backlog_protected,
+         "an over-budget due item suppresses new material for the focus session");
+
+  const auto unprotected_plan =
+      plan_queue(protected_candidates, {now, now - 1000, 20, 300, false});
+  expect(unprotected_plan.items.size() == 2 &&
+             unprotected_plan.items.back().item.id == "new-card" &&
+             unprotected_plan.omitted_due_count == 1 &&
+             unprotected_plan.omitted_new_count == 0 &&
+             !unprotected_plan.backlog_protected,
+         "backlog protection remains an explicit queue policy");
+}
+
+void test_load_forecast() {
+  constexpr std::int64_t day_start = 1'800'000'000;
+  const std::vector<QueueCandidate> candidates = {
+      {"overdue", StudyKind::MemoryCard, CardState::Review, day_start - 1, 45, false},
+      {"today", StudyKind::MathProblem, CardState::Review, day_start + 100, 480, false},
+      {"tomorrow", StudyKind::MemoryCard, CardState::Review,
+       day_start + 86'400, 60, false},
+      {"week", StudyKind::MemoryCard, CardState::Review,
+       day_start + 6 * 86'400, 0, false},
+      {"outside", StudyKind::MemoryCard, CardState::Review,
+       day_start + 7 * 86'400, 45, false},
+      {"new", StudyKind::MemoryCard, CardState::New, 0, 45, false},
+      {"deleted", StudyKind::MemoryCard, CardState::Review,
+       day_start + 86'400, 45, false, {}, true},
+  };
+  const auto forecast = forecast_load(candidates, day_start);
+  expect(forecast.overdue_count == 1 &&
+             forecast.overdue_estimated_seconds == 45,
+         "forecast separates overdue work from calendar buckets");
+  expect(forecast.days.size() == 7 && forecast.days[0].due_count == 1 &&
+             forecast.days[0].estimated_seconds == 480 &&
+             forecast.days[1].due_count == 1 &&
+             forecast.days[6].due_count == 1,
+         "forecast reports the next seven local calendar days");
+  try {
+    (void)forecast_load(candidates, day_start, 32);
+    expect(false, "forecast rejects an excessive range");
+  } catch (const std::invalid_argument&) {
+  }
 }
 
 void test_queue_validation() {
@@ -204,6 +260,7 @@ int main() {
   test_math_capture_and_rating();
   test_queue_order_and_sections();
   test_queue_time_budget();
+  test_load_forecast();
   test_queue_validation();
   test_v2_preferences_and_interleaving();
   test_large_library_queue();

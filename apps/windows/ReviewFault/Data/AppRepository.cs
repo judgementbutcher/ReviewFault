@@ -23,7 +23,9 @@ public sealed record StudyRow(
     string TemplateType,
     string StructuredJson);
 
-public sealed record DashboardSummary(int Overdue, int DueToday, int NewItems, int EstimatedMinutes);
+public sealed record DashboardSummary(
+    int Overdue, int DueToday, int NewItems, int EstimatedMinutes,
+    int DeferredDueMinutes, int TomorrowDue, int NextSevenDaysDue);
 public sealed record LearningPreferences(
     int DailyNewMemoryLimit, int SessionMinutes, string MemoryPreset,
     string MathIntensity, bool IncludeMemoryCards, bool IncludeMathProblems,
@@ -36,7 +38,7 @@ public sealed record TrashRow(string Id, string Kind, string Prompt, long Delete
 
 public sealed class AppRepository
 {
-    private const string AppVersion = "0.3.0";
+    private const string AppVersion = "0.3.1";
     private const long MaxBackupBytes = 2L * 1024 * 1024 * 1024;
     private const int MaxBackupEntries = 10_000;
     // The v1 review_log remains read-only input for gradual history replay.
@@ -114,7 +116,12 @@ public sealed class AppRepository
                WHERE mr.state_before = 0 AND e.reviewed_at >= $dayStart) +
                (SELECT COUNT(*) FROM review_event_v3 e
                 JOIN memory_review_event_v3 mr ON mr.review_event_id = e.id
-                WHERE mr.state_before = 0 AND e.reviewed_at >= $dayStart))
+                WHERE mr.state_before = 0 AND e.reviewed_at >= $dayStart)),
+              lp.session_minutes,
+              COALESCE(SUM(CASE WHEN s.scheduler_state <> 0
+                AND s.due_at >= $tomorrowStart AND s.due_at < $tomorrowEnd THEN 1 ELSE 0 END), 0),
+              COALESCE(SUM(CASE WHEN s.scheduler_state <> 0
+                AND s.due_at > $now AND s.due_at <= $weekEnd THEN 1 ELSE 0 END), 0)
             FROM learning_preferences lp
             LEFT JOIN study_item s ON s.suspended_at IS NULL AND s.deleted_at IS NULL AND (
               (s.kind = 'math_problem' AND lp.include_math_problems = 1) OR
@@ -127,17 +134,39 @@ public sealed class AppRepository
             """;
         command.Parameters.AddWithValue("$dayStart", dayStart);
         command.Parameters.AddWithValue("$now", now);
+        command.Parameters.AddWithValue("$tomorrowStart", dayStart + 86_400);
+        command.Parameters.AddWithValue("$tomorrowEnd", dayStart + 2 * 86_400);
+        command.Parameters.AddWithValue("$weekEnd", now + 7 * 86_400);
         await using var reader = await command.ExecuteReaderAsync();
         await reader.ReadAsync();
         var remainingNewMemory = Math.Max(0, reader.GetInt32(5) - reader.GetInt32(6));
-        var newMemory = Math.Min(reader.GetInt32(2), remainingNewMemory);
-        var newMath = reader.GetInt32(3);
+        var dueSeconds = reader.GetInt32(4);
+        var budgetSeconds = reader.GetInt32(7) * 60;
+        var remainingSeconds = Math.Max(0, budgetSeconds - dueSeconds);
+        var newMemory = 0;
+        var newMath = 0;
+        if (dueSeconds <= budgetSeconds)
+        {
+            newMemory = Math.Min(Math.Min(reader.GetInt32(2), remainingNewMemory),
+                remainingSeconds / 45);
+            remainingSeconds -= newMemory * 45;
+            newMath = Math.Min(reader.GetInt32(3), remainingSeconds / 480);
+        }
+        if (dueSeconds == 0 && newMemory == 0 && newMath == 0)
+        {
+            if (reader.GetInt32(2) > 0 && remainingNewMemory > 0) newMemory = 1;
+            else if (reader.GetInt32(3) > 0) newMath = 1;
+        }
+        var focusSeconds = Math.Min(dueSeconds, budgetSeconds) +
+            newMemory * 45 + newMath * 480;
         return new DashboardSummary(reader.GetInt32(0), reader.GetInt32(1),
             newMemory + newMath,
-            (reader.GetInt32(4) + newMemory * 45 + newMath * 480 + 59) / 60);
+            (focusSeconds + 59) / 60,
+            (Math.Max(0, dueSeconds - budgetSeconds) + 59) / 60,
+            reader.GetInt32(8), reader.GetInt32(9));
     }
 
-    public async Task<StudyRow?> NextForReviewAsync(long now)
+    public async Task<StudyRow?> NextForReviewAsync(long now, bool includeNewItems = true)
     {
         var dayStart = new DateTimeOffset(DateTime.Today).ToUnixTimeSeconds();
         await using var connection = await OpenAsync();
@@ -168,7 +197,7 @@ public sealed class AppRepository
                   (s.subject = 'operating_systems' AND lp.enable_operating_systems = 1) OR
                   (s.subject = 'computer_networks' AND lp.enable_computer_networks = 1))))
               AND ((s.scheduler_state <> 0 AND s.due_at <= $now)
-                OR (s.scheduler_state = 0 AND (s.kind = 'math_problem' OR (
+                OR ($includeNewItems = 1 AND s.scheduler_state = 0 AND (s.kind = 'math_problem' OR (
                   SELECT
                     (SELECT COUNT(*) FROM review_event_v2 e
                      JOIN memory_review_event_v2 mr ON mr.review_event_id = e.id
@@ -194,6 +223,7 @@ public sealed class AppRepository
             """;
         command.Parameters.AddWithValue("$now", now);
         command.Parameters.AddWithValue("$dayStart", dayStart);
+        command.Parameters.AddWithValue("$includeNewItems", includeNewItems ? 1 : 0);
         await using var reader = await command.ExecuteReaderAsync();
         if (!await reader.ReadAsync()) return null;
         return new StudyRow(

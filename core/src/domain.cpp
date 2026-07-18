@@ -266,6 +266,8 @@ QueuePlan plan_queue(const std::vector<QueueCandidate>& candidates,
       } else {
         ++plan.omitted_due_count;
       }
+      plan.deferred_estimated_seconds =
+          safe_add(plan.deferred_estimated_seconds, estimate);
       return;
     }
     plan.items.push_back(planned);
@@ -275,10 +277,21 @@ QueuePlan plan_queue(const std::vector<QueueCandidate>& candidates,
   for (const auto& item : due) {
     try_append(item, false);
   }
+  if (config.protect_backlog && plan.omitted_due_count != 0) {
+    plan.backlog_protected = true;
+    plan.omitted_new_count = static_cast<std::uint32_t>(fresh.size());
+    for (const auto& item : fresh) {
+      plan.deferred_estimated_seconds = safe_add(
+          plan.deferred_estimated_seconds, effective_estimate(item.item));
+    }
+    return plan;
+  }
   for (const auto& item : fresh) {
     const bool consumes_limit = item.item.kind == StudyKind::MemoryCard;
     if (consumes_limit && used_new_memory >= config.new_item_limit) {
       ++plan.omitted_new_count;
+      plan.deferred_estimated_seconds = safe_add(
+          plan.deferred_estimated_seconds, effective_estimate(item.item));
       continue;
     }
     const auto before = plan.items.size();
@@ -288,6 +301,42 @@ QueuePlan plan_queue(const std::vector<QueueCandidate>& candidates,
     }
   }
   return plan;
+}
+
+LoadForecast forecast_load(const std::vector<QueueCandidate>& candidates,
+                           std::int64_t local_day_start_utc,
+                           std::uint32_t day_count) {
+  if (local_day_start_utc <= 0 || day_count == 0 || day_count > 31) {
+    throw std::invalid_argument("forecast range is invalid");
+  }
+  constexpr std::int64_t kSecondsPerDay = 86'400;
+  LoadForecast forecast;
+  forecast.days.reserve(day_count);
+  for (std::uint32_t day = 0; day < day_count; ++day) {
+    forecast.days.push_back({day, 0, 0});
+  }
+  for (const auto& candidate : candidates) {
+    if (candidate.id.empty() || candidate.suspended || candidate.deleted ||
+        candidate.scheduler_state == CardState::New || candidate.due_at <= 0) {
+      continue;
+    }
+    const auto estimate = effective_estimate(candidate);
+    if (candidate.due_at < local_day_start_utc) {
+      ++forecast.overdue_count;
+      forecast.overdue_estimated_seconds =
+          safe_add(forecast.overdue_estimated_seconds, estimate);
+      continue;
+    }
+    const auto offset = static_cast<std::uint64_t>(
+        (candidate.due_at - local_day_start_utc) / kSecondsPerDay);
+    if (offset >= day_count) {
+      continue;
+    }
+    auto& bucket = forecast.days[static_cast<std::size_t>(offset)];
+    ++bucket.due_count;
+    bucket.estimated_seconds = safe_add(bucket.estimated_seconds, estimate);
+  }
+  return forecast;
 }
 
 }  // namespace reviewfault

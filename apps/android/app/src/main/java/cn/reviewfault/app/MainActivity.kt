@@ -284,9 +284,17 @@ private fun TodayScreen(state: AppUiState, model: AppViewModel) = Page {
                     Text(if (total == 0) "今天已清空" else "今日学习", style = MaterialTheme.typography.headlineSmall)
                     Spacer(Modifier.height(4.dp))
                     Text(
-                        if (total == 0) "没有待处理任务，去积累下一次进步。" else "大约 ${state.summary.estimatedMinutes} 分钟 · 可分段完成",
+                        if (total == 0) "没有待处理任务，去积累下一次进步。"
+                        else "本轮约 ${state.summary.estimatedMinutes} 分钟 · 到时自然收尾",
                         color = MaterialTheme.colorScheme.onSurfaceVariant,
                     )
+                    if (state.summary.deferredDueMinutes > 0) {
+                        Text(
+                            "另有约 ${state.summary.deferredDueMinutes} 分钟到期内容，暂不加入新内容",
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.tertiary,
+                        )
+                    }
                 }
                 Surface(shape = RoundedCornerShape(16.dp), color = MaterialTheme.colorScheme.primaryContainer) {
                     Icon(
@@ -307,9 +315,29 @@ private fun TodayScreen(state: AppUiState, model: AppViewModel) = Page {
                 modifier = Modifier.fillMaxWidth().height(56.dp),
                 shape = RoundedCornerShape(18.dp),
             ) {
-                Text(if (total == 0) "添加第一条内容" else "开始今日复习")
+                Text(if (total == 0) "添加第一条内容" else "开始专注轮次")
                 Spacer(Modifier.width(8.dp))
                 Icon(if (total == 0) Icons.Default.Add else Icons.AutoMirrored.Filled.ArrowForward, contentDescription = null, Modifier.size(19.dp))
+            }
+        }
+    }
+    Card(
+        modifier = Modifier.fillMaxWidth(),
+        shape = RoundedCornerShape(18.dp),
+        colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = .5f)),
+    ) {
+        Row(
+            Modifier.fillMaxWidth().padding(17.dp),
+            horizontalArrangement = Arrangement.SpaceBetween,
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
+            Column {
+                Text("学习负载预报", style = MaterialTheme.typography.titleMedium)
+                Text("提前看见波峰，更容易保持节奏", color = MaterialTheme.colorScheme.onSurfaceVariant)
+            }
+            Column(horizontalAlignment = Alignment.End) {
+                Text("明日 ${state.summary.tomorrowDue} 条", style = MaterialTheme.typography.titleSmall)
+                Text("未来 7 天 ${state.summary.nextSevenDaysDue} 条", color = MaterialTheme.colorScheme.onSurfaceVariant)
             }
         }
     }
@@ -738,7 +766,19 @@ private fun ReviewScreen(state: AppUiState, model: AppViewModel) {
                 }
             }
         }
-        item { LinearProgressIndicator(progress = { if (state.answerRevealed) .72f else .35f }, modifier = Modifier.fillMaxWidth().clip(RoundedCornerShape(8.dp))) }
+        item {
+            val sessionProgress = if (state.sessionTargetSeconds <= 0) 0f else
+                state.sessionElapsedSeconds.toFloat() / state.sessionTargetSeconds
+            LinearProgressIndicator(
+                progress = { (sessionProgress + if (state.answerRevealed) .08f else .03f).coerceIn(.03f, 1f) },
+                modifier = Modifier.fillMaxWidth().clip(RoundedCornerShape(8.dp)),
+            )
+            Text(
+                "本轮已完成 ${state.sessionReviewedCount} 条",
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
+        }
         if (row.prompt.isNotBlank()) {
             item {
                 Card(shape = RoundedCornerShape(20.dp), colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface)) {

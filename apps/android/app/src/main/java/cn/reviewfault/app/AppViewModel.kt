@@ -37,6 +37,10 @@ data class AppUiState(
     val current: StudyRow? = null,
     val answerRevealed: Boolean = false,
     val startedAt: Long = 0,
+    val sessionTargetSeconds: Int = 0,
+    val sessionElapsedSeconds: Int = 0,
+    val sessionReviewedCount: Int = 0,
+    val sessionAllowsNewItems: Boolean = true,
     val preferences: LearningPreferences = LearningPreferences(),
     val themeMode: Int = 0,
     val reminderEnabled: Boolean = false,
@@ -159,11 +163,33 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
     }
 
     fun startReview() = io(exclusive = true) {
+        mutableState.update { current ->
+            current.copy(
+                sessionTargetSeconds = current.summary.estimatedMinutes.coerceAtLeast(1) * 60,
+                sessionElapsedSeconds = 0,
+                sessionReviewedCount = 0,
+                sessionAllowsNewItems = current.summary.deferredDueMinutes == 0,
+            )
+        }
         startReviewNow()
     }
 
     private fun startReviewNow(message: String? = null) {
-        val row = database.nextForReview(Instant.now().epochSecond)
+        val session = mutableState.value
+        if (session.sessionReviewedCount > 0 &&
+            session.sessionElapsedSeconds >= session.sessionTargetSeconds) {
+            refreshTodayNow()
+            mutableState.update { it.copy(
+                destination = AppDestination.Today,
+                current = null,
+                answerRevealed = false,
+                message = "本轮完成：${it.sessionReviewedCount} 条 · ${formatMinutes(it.sessionElapsedSeconds)}",
+            ) }
+            return
+        }
+        val row = database.nextForReview(
+            Instant.now().epochSecond, session.sessionAllowsNewItems,
+        )
         if (row == null) refreshTodayNow()
         mutableState.update { it.copy(
             destination = if (row == null) AppDestination.Today else AppDestination.Review,
@@ -179,10 +205,15 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
         val snapshot = mutableState.value
         val row = snapshot.current ?: return@io
         val reviewedAt = Instant.now().epochSecond
+        val durationSeconds = (reviewedAt - snapshot.startedAt).toInt().coerceAtLeast(0)
         val result = database.review(
-            row, rating, reviewedAt, (reviewedAt - snapshot.startedAt).toInt().coerceAtLeast(0),
+            row, rating, reviewedAt, durationSeconds,
             mathResult, errorReason, hintRevealed,
         )
+        mutableState.update { it.copy(
+            sessionElapsedSeconds = it.sessionElapsedSeconds + durationSeconds,
+            sessionReviewedCount = it.sessionReviewedCount + 1,
+        ) }
         refreshTodayNow()
         startReviewNow("已保存，下次约 ${formatDays(result.scheduledDays)} 后")
     }
@@ -240,5 +271,10 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
         days < 1.0 / 24.0 -> "${kotlin.math.round(days * 24 * 60).toInt()} 分钟"
         days < 1 -> "${kotlin.math.round(days * 24).toInt()} 小时"
         else -> "${kotlin.math.round(days).toInt()} 天"
+    }
+
+    private fun formatMinutes(seconds: Int): String {
+        val minutes = (seconds + 59) / 60
+        return if (minutes <= 1) "不到 1 分钟" else "$minutes 分钟"
     }
 }

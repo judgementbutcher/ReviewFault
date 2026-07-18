@@ -31,6 +31,10 @@ public sealed class MainWindow : Window
     };
     private bool initialized;
     private ReminderService? reminderService;
+    private int reviewSessionTargetSeconds;
+    private int reviewSessionReviewed;
+    private int reviewSessionElapsedSeconds;
+    private bool reviewSessionAllowsNewItems = true;
 
     public MainWindow()
     {
@@ -97,8 +101,16 @@ public sealed class MainWindow : Window
         panel.Children.Add(Card(
             Heading("今日学习", 22),
             Body($"逾期 {summary.Overdue}  ·  到期 {summary.DueToday}  ·  新内容 {summary.NewItems}"),
-            Body($"预计 {summary.EstimatedMinutes} 分钟"),
-            ActionButton("开始复习", async () => await ShowReviewAsync())));
+            Body($"本轮约 {summary.EstimatedMinutes} 分钟，到时自然收尾"),
+            summary.DeferredDueMinutes > 0
+                ? Body($"另有约 {summary.DeferredDueMinutes} 分钟到期内容，暂不加入新内容")
+                : Body("本轮可以覆盖当前到期内容"),
+            ActionButton("开始专注轮次", () => StartReviewSessionAsync(
+                summary.EstimatedMinutes, summary.DeferredDueMinutes == 0))));
+        panel.Children.Add(Card(
+            Heading("学习负载预报", 20),
+            Body($"明日 {summary.TomorrowDue} 条  ·  未来 7 天 {summary.NextSevenDaysDue} 条"),
+            Body("提前看见波峰，更容易保持节奏。")));
         panel.Children.Add(Heading("快速记录", 20));
         panel.Children.Add(ActionButton("导入数学题面", PickMathImageAsync));
         panel.Children.Add(ActionButton("新建 408 记忆卡", ShowMemoryEditorAsync));
@@ -199,7 +211,8 @@ public sealed class MainWindow : Window
 
     private async Task ShowReviewAsync()
     {
-        var row = await viewModel.Repository.NextForReviewAsync(DateTimeOffset.UtcNow.ToUnixTimeSeconds());
+        var row = await viewModel.Repository.NextForReviewAsync(
+            DateTimeOffset.UtcNow.ToUnixTimeSeconds(), reviewSessionAllowsNewItems);
         if (row is null)
         {
             await MessageAsync("当前没有到期内容，可以先新建一张卡片。");
@@ -208,6 +221,8 @@ public sealed class MainWindow : Window
         var startedAt = DateTimeOffset.UtcNow.ToUnixTimeSeconds();
         var panel = PagePanel();
         panel.Children.Add(Body(row.Kind == "math_problem" ? "数学 · 重做" : "408 · 主动回忆"));
+        panel.Children.Add(Body(
+            $"本轮已完成 {reviewSessionReviewed} 条 · 已用约 {(reviewSessionElapsedSeconds + 59) / 60} 分钟"));
         panel.Children.Add(Heading(
             row.Kind == "math_problem" ? "先独立完成，再看答案" : "先在脑中或纸上作答", 28));
         if (!string.IsNullOrWhiteSpace(row.Prompt)) panel.Children.Add(Card(Body(ReviewPrompt(row))));
@@ -263,6 +278,15 @@ public sealed class MainWindow : Window
                 var reviewedAt = DateTimeOffset.UtcNow.ToUnixTimeSeconds();
                 var result = await viewModel.Repository.ReviewAsync(
                     row, rating, reviewedAt, checked((int)(reviewedAt - startedAt)), mathResult);
+                reviewSessionElapsedSeconds += checked((int)(reviewedAt - startedAt));
+                reviewSessionReviewed++;
+                if (reviewSessionElapsedSeconds >= reviewSessionTargetSeconds)
+                {
+                    await MessageAsync(
+                        $"本轮完成：{reviewSessionReviewed} 条。最近一条下次间隔约 {FormatInterval(result.ScheduledDays)}。");
+                    await ShowHomeAsync();
+                    return;
+                }
                 await MessageAsync($"已保存，下次间隔约 {FormatInterval(result.ScheduledDays)}。");
                 await ShowReviewAsync();
             }));
@@ -271,6 +295,15 @@ public sealed class MainWindow : Window
         panel.Children.Add(answerPanel);
         panel.Children.Add(ActionButton("返回首页", ShowHomeAsync));
         SetPage(panel);
+    }
+
+    private async Task StartReviewSessionAsync(int targetMinutes, bool allowNewItems)
+    {
+        reviewSessionTargetSeconds = Math.Max(1, targetMinutes) * 60;
+        reviewSessionReviewed = 0;
+        reviewSessionElapsedSeconds = 0;
+        reviewSessionAllowsNewItems = allowNewItems;
+        await ShowReviewAsync();
     }
 
     private async Task ShowMemoryEditorAsync()

@@ -143,6 +143,9 @@ struct QueuePlanConfig {
   std::uint32_t new_item_limit = 20;
   // Zero means no time-budget filtering.
   std::uint32_t available_seconds = 0;
+  // When a focused session cannot fit all due work, do not grow the backlog by
+  // introducing new material into the same plan.
+  bool protect_backlog = true;
 };
 
 struct PlannedItem {
@@ -153,11 +156,29 @@ struct PlannedItem {
 struct QueuePlan {
   std::vector<PlannedItem> items;
   std::uint32_t estimated_seconds = 0;
+  std::uint32_t deferred_estimated_seconds = 0;
   std::uint32_t omitted_due_count = 0;
   std::uint32_t omitted_new_count = 0;
+  bool backlog_protected = false;
 };
 
 [[nodiscard]] QueuePlan plan_queue(const std::vector<QueueCandidate>& candidates,
                                    const QueuePlanConfig& config);
+
+struct ForecastBucket {
+  std::uint32_t day_offset = 0;
+  std::uint32_t due_count = 0;
+  std::uint32_t estimated_seconds = 0;
+};
+
+struct LoadForecast {
+  std::uint32_t overdue_count = 0;
+  std::uint32_t overdue_estimated_seconds = 0;
+  std::vector<ForecastBucket> days;
+};
+
+[[nodiscard]] LoadForecast forecast_load(
+    const std::vector<QueueCandidate>& candidates,
+    std::int64_t local_day_start_utc, std::uint32_t day_count = 7);
 
 }  // namespace reviewfault

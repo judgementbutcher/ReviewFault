@@ -38,7 +38,15 @@ try
     Require((await repository.MediaPathsAsync(mathId)).Count == 2,
         "a multi-page math problem preserves both images");
 
-    var next = await repository.NextForReviewAsync(DateTimeOffset.UtcNow.ToUnixTimeSeconds());
+    var queueNow = DateTimeOffset.UtcNow.ToUnixTimeSeconds();
+    var initialSummary = await repository.DashboardAsync(
+        queueNow, new DateTimeOffset(DateTime.Today).ToUnixTimeSeconds());
+    Require(initialSummary.NewItems == 3 && initialSummary.EstimatedMinutes == 10 &&
+        initialSummary.DeferredDueMinutes == 0,
+        "dashboard builds a bounded focus session from new memory and math content");
+    Require(await repository.NextForReviewAsync(queueNow, includeNewItems: false) is null,
+        "a backlog-protected session does not introduce new content");
+    var next = await repository.NextForReviewAsync(queueNow);
     Require(next is not null, "a new item enters today's queue");
     var reviewedAt = DateTimeOffset.UtcNow.ToUnixTimeSeconds();
     var result = await repository.ReviewAsync(next!, Rating.Good, reviewedAt, 30,
@@ -128,6 +136,8 @@ try
     var summary = await repository.DashboardAsync(
         DateTimeOffset.UtcNow.ToUnixTimeSeconds(), new DateTimeOffset(DateTime.Today).ToUnixTimeSeconds());
     Require(summary.NewItems <= 1, "dashboard reads the reviewed restored queue state");
+    Require(summary.NextSevenDaysDue >= summary.TomorrowDue,
+        "seven-day forecast includes the next local calendar day");
     Console.WriteLine("Windows repository integration tests passed");
 }
 finally

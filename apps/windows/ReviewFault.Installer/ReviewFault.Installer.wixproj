@@ -1,7 +1,7 @@
 <Project Sdk="WixToolset.Sdk/6.0.2">
   <PropertyGroup>
     <InstallerPlatform>x64</InstallerPlatform>
-    <ProductVersion Condition="'$(ProductVersion)' == ''">0.3.0</ProductVersion>
+    <ProductVersion Condition="'$(ProductVersion)' == ''">0.3.1</ProductVersion>
     <PublishDir Condition="'$(PublishDir)' == ''">$(MSBuildThisFileDirectory)..\ReviewFault\bin\x64\Release\net8.0-windows10.0.19041.0\win-x64\publish</PublishDir>
     <OutputName>ReviewFault-windows-v$(ProductVersion)-x64</OutputName>
     <DefineConstants>$(DefineConstants);ProductVersion=$(ProductVersion)</DefineConstants>
