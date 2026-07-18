@@ -29,7 +29,7 @@ cd apps/android
 需要仓库 secrets：`ANDROID_KEYSTORE_BASE64`、`ANDROID_KEYSTORE_PASSWORD`、
 `ANDROID_KEY_ALIAS`、`ANDROID_KEY_PASSWORD`、`ANDROID_CERT_SHA256`。其中第一个值是
 JKS/PKCS12 文件的 base64 内容，最后一个值是证书 SHA-256 指纹（小写且不含冒号）；
-私钥本身不得提交到仓库。配置完成后，`v0.2.3` tag 会构建并校验
+私钥本身不得提交到仓库。配置完成后，`v0.3.0` tag 会构建并校验
 `assembleRelease`，生成可覆盖升级的正式 APK。
 
 ## Windows
@@ -65,7 +65,7 @@ msbuild apps/windows/ReviewFault/ReviewFault.csproj -restore -t:Publish `
   -p:SelfContained=true -p:WindowsAppSDKSelfContained=true
 
 dotnet build apps/windows/ReviewFault.Installer/ReviewFault.Installer.wixproj `
-  -c Release -p:ProductVersion=0.2.3
+  -c Release -p:ProductVersion=0.3.0
 ```
 
 第一个命令同时携带 .NET 8 与 Windows App SDK 运行时，修复干净系统启动时要求另行安装

@@ -7,6 +7,9 @@ const schema = JSON.parse(readFileSync(
 const schemaV2 = JSON.parse(readFileSync(
   new URL('../backup-v2.schema.json', import.meta.url), 'utf8',
 ));
+const schemaV3 = JSON.parse(readFileSync(
+  new URL('../backup-v3.schema.json', import.meta.url), 'utf8',
+));
 assert.equal(schema.properties.format.const, 'reviewfault-backup');
 assert.equal(schema.properties.version.const, 1);
 assert.equal(schema.properties.schemaVersion.const, 1);
@@ -33,6 +36,13 @@ const appVersionPattern = new RegExp(schemaV2.properties.appVersion.pattern);
 assert(appVersionPattern.test('0.2.0'));
 assert(appVersionPattern.test('0.2.1-rc1'));
 assert(!appVersionPattern.test('0.1.0'));
+
+assert.equal(schemaV3.properties.version.const, 3);
+assert.equal(schemaV3.properties.schemaVersion.const, 3);
+assert.equal(schemaV3.properties.schedulerAbiVersion.const, 3);
+const appVersionPatternV3 = new RegExp(schemaV3.properties.appVersion.pattern);
+assert(appVersionPatternV3.test('0.3.0'));
+assert(!appVersionPatternV3.test('0.2.3'));
 
 const implementations = [
   '../../apps/android/app/src/main/java/cn/reviewfault/app/data/AppDatabase.kt',

@@ -26,7 +26,8 @@ public sealed record StudyRow(
 public sealed record DashboardSummary(int Overdue, int DueToday, int NewItems, int EstimatedMinutes);
 public sealed record LearningPreferences(
     int DailyNewMemoryLimit, int SessionMinutes, string MemoryPreset,
-    string MathIntensity, bool IncludeMemoryCards, bool IncludeMathProblems);
+    string MathIntensity, bool IncludeMemoryCards, bool IncludeMathProblems,
+    int SchedulerGeneration = 3);
 public sealed record LibraryFilter(
     string Query = "", string? Subject = null, string? Kind = null,
     string Status = "all", bool IncludeDeleted = false, int Offset = 0, int Limit = 50);
@@ -35,10 +36,11 @@ public sealed record TrashRow(string Id, string Kind, string Prompt, long Delete
 
 public sealed class AppRepository
 {
-    private const string AppVersion = "0.2.3";
+    private const string AppVersion = "0.3.0";
     private const long MaxBackupBytes = 2L * 1024 * 1024 * 1024;
     private const int MaxBackupEntries = 10_000;
     // The v1 review_log remains read-only input for gradual history replay.
+    // v3 parameter checksums are foreign-keyed to algorithm_parameter_registry.
     private readonly string appDirectory;
     private readonly string connectionString;
 
@@ -79,7 +81,15 @@ public sealed class AppRepository
             await command.ExecuteNonQueryAsync();
             current = 2;
         }
-        if (current != 2)
+        if (current == 2)
+        {
+            var migrationPath = Path.Combine(AppContext.BaseDirectory, "schema", "003_v0_3.sql");
+            var command = connection.CreateCommand();
+            command.CommandText = await File.ReadAllTextAsync(migrationPath);
+            await command.ExecuteNonQueryAsync();
+            current = 3;
+        }
+        if (current != 3)
         {
             throw new InvalidOperationException($"不支持的数据库版本：{current}");
         }
@@ -99,9 +109,12 @@ public sealed class AppRepository
               COALESCE(SUM(CASE WHEN s.scheduler_state <> 0 AND s.due_at <= $now
                 THEN CASE WHEN s.kind = 'math_problem' THEN 480 ELSE 45 END ELSE 0 END), 0),
               lp.daily_new_memory_limit,
-              (SELECT COUNT(*) FROM review_event_v2 e
+              ((SELECT COUNT(*) FROM review_event_v2 e
                JOIN memory_review_event_v2 mr ON mr.review_event_id = e.id
-               WHERE mr.state_before = 0 AND e.reviewed_at >= $dayStart)
+               WHERE mr.state_before = 0 AND e.reviewed_at >= $dayStart) +
+               (SELECT COUNT(*) FROM review_event_v3 e
+                JOIN memory_review_event_v3 mr ON mr.review_event_id = e.id
+                WHERE mr.state_before = 0 AND e.reviewed_at >= $dayStart))
             FROM learning_preferences lp
             LEFT JOIN study_item s ON s.suspended_at IS NULL AND s.deleted_at IS NULL AND (
               (s.kind = 'math_problem' AND lp.include_math_problems = 1) OR
@@ -156,15 +169,25 @@ public sealed class AppRepository
                   (s.subject = 'computer_networks' AND lp.enable_computer_networks = 1))))
               AND ((s.scheduler_state <> 0 AND s.due_at <= $now)
                 OR (s.scheduler_state = 0 AND (s.kind = 'math_problem' OR (
-                  SELECT COUNT(*) FROM review_event_v2 e
-                  JOIN memory_review_event_v2 mr ON mr.review_event_id = e.id
-                  WHERE mr.state_before = 0 AND e.reviewed_at >= $dayStart
+                  SELECT
+                    (SELECT COUNT(*) FROM review_event_v2 e
+                     JOIN memory_review_event_v2 mr ON mr.review_event_id = e.id
+                     WHERE mr.state_before = 0 AND e.reviewed_at >= $dayStart) +
+                    (SELECT COUNT(*) FROM review_event_v3 e
+                     JOIN memory_review_event_v3 mr ON mr.review_event_id = e.id
+                     WHERE mr.state_before = 0 AND e.reviewed_at >= $dayStart)
                 ) < lp.daily_new_memory_limit)))
             ORDER BY
               CASE WHEN s.scheduler_state <> 0 AND s.due_at < $dayStart THEN 0
                    WHEN s.scheduler_state <> 0 THEN 1 ELSE 2 END,
               CASE WHEN s.scheduler_state <> 0 AND s.due_at < $dayStart
                    THEN CASE WHEN s.kind = 'memory_card' THEN 0 ELSE 1 END ELSE 0 END,
+              CASE WHEN s.kind = 'math_problem' AND s.chapter_id IS NOT NULL AND
+                s.chapter_id = (SELECT previous.chapter_id FROM study_item previous
+                  WHERE previous.id = (SELECT study_item_id FROM (
+                    SELECT study_item_id, reviewed_at FROM review_event_v3
+                    UNION ALL SELECT study_item_id, reviewed_at FROM review_event_v2
+                  ) ORDER BY reviewed_at DESC LIMIT 1)) THEN 1 ELSE 0 END,
               CASE WHEN s.kind = 'memory_card' THEN 0 ELSE 1 END,
               s.due_at, s.created_at
             LIMIT 1
@@ -232,20 +255,22 @@ public sealed class AppRepository
         var command = connection.CreateCommand();
         command.CommandText = """
             SELECT daily_new_memory_limit, session_minutes, memory_preset,
-                   math_intensity, include_memory_cards, include_math_problems
+                   math_intensity, include_memory_cards, include_math_problems,
+                   scheduler_generation
             FROM learning_preferences WHERE singleton = 1
             """;
         await using var reader = await command.ExecuteReaderAsync();
         if (!await reader.ReadAsync()) throw new InvalidOperationException("学习设置不存在");
         return new LearningPreferences(reader.GetInt32(0), reader.GetInt32(1),
             reader.GetString(2), reader.GetString(3), reader.GetInt32(4) != 0,
-            reader.GetInt32(5) != 0);
+            reader.GetInt32(5) != 0, reader.GetInt32(6));
     }
 
     public async Task SaveLearningPreferencesAsync(LearningPreferences value)
     {
         if (value.DailyNewMemoryLimit is < 0 or > 500 || value.SessionMinutes is < 1 or > 240 ||
-            (!value.IncludeMemoryCards && !value.IncludeMathProblems))
+            (!value.IncludeMemoryCards && !value.IncludeMathProblems) ||
+            value.SchedulerGeneration is < 2 or > 3)
             throw new ArgumentException("学习设置超出范围");
         await using var connection = await OpenAsync();
         var command = connection.CreateCommand();
@@ -253,7 +278,8 @@ public sealed class AppRepository
             UPDATE learning_preferences SET daily_new_memory_limit = $limit,
               session_minutes = $minutes, memory_preset = $memory,
               math_intensity = $math, include_memory_cards = $memoryEnabled,
-              include_math_problems = $mathEnabled, updated_at = $now
+              include_math_problems = $mathEnabled, scheduler_generation = $generation,
+              updated_at = $now
             WHERE singleton = 1
             """;
         command.Parameters.AddWithValue("$limit", value.DailyNewMemoryLimit);
@@ -262,6 +288,7 @@ public sealed class AppRepository
         command.Parameters.AddWithValue("$math", value.MathIntensity);
         command.Parameters.AddWithValue("$memoryEnabled", value.IncludeMemoryCards ? 1 : 0);
         command.Parameters.AddWithValue("$mathEnabled", value.IncludeMathProblems ? 1 : 0);
+        command.Parameters.AddWithValue("$generation", value.SchedulerGeneration);
         command.Parameters.AddWithValue("$now", DateTimeOffset.UtcNow.ToUnixTimeSeconds());
         await command.ExecuteNonQueryAsync();
     }
@@ -521,14 +548,71 @@ public sealed class AppRepository
         var preferences = await GetLearningPreferencesAsync();
         var preset = preferences.MemoryPreset switch { "time_saving" => 0, "reinforced" => 2, _ => 1 };
         var intensity = preferences.MathIntensity switch { "intensive" => 0, "relaxed" => 2, _ => 1 };
+        var durationQuality = durationSeconds < 5 ? 2 : durationSeconds > 3600 ? 3 : 1;
+        uint historyCount = 0, recentFailures = 0;
+        double calibrationImprovement = 0;
+        if (preferences.SchedulerGeneration == 3)
+        {
+            await using var metricsConnection = await OpenAsync();
+            var metrics = metricsConnection.CreateCommand();
+            metrics.CommandText = """
+                SELECT
+                  (SELECT COUNT(*) FROM review_event_v2 WHERE study_item_id = $id) +
+                  (SELECT COUNT(*) FROM review_event_v3 WHERE study_item_id = $id),
+                  (SELECT COUNT(*) FROM (
+                    SELECT feedback FROM (
+                      SELECT feedback, reviewed_at FROM review_event_v2 WHERE study_item_id = $id
+                      UNION ALL
+                      SELECT feedback, reviewed_at FROM review_event_v3 WHERE study_item_id = $id
+                    ) ORDER BY reviewed_at DESC LIMIT 4
+                  ) WHERE feedback <= 1)
+                """;
+            metrics.Parameters.AddWithValue("$id", row.Id);
+            await using var metricsReader = await metrics.ExecuteReaderAsync();
+            await metricsReader.ReadAsync();
+            historyCount = checked((uint)metricsReader.GetInt64(0));
+            recentFailures = checked((uint)metricsReader.GetInt64(1));
+            await metricsReader.DisposeAsync();
+            if (row.Kind == "memory_card")
+            {
+                var calibration = metricsConnection.CreateCommand();
+                calibration.CommandText = """
+                    SELECT e.feedback, m.retrievability_before
+                    FROM review_event_v2 e
+                    JOIN memory_review_event_v2 m ON m.review_event_id = e.id
+                    UNION ALL
+                    SELECT e.feedback, m.retrievability_before
+                    FROM review_event_v3 e
+                    JOIN memory_review_event_v3 m ON m.review_event_id = e.id
+                    """;
+                var samples = new List<(double Observed, double Predicted)>();
+                await using var calibrationReader = await calibration.ExecuteReaderAsync();
+                while (await calibrationReader.ReadAsync())
+                    samples.Add((calibrationReader.GetInt32(0) > 1 ? 1 : 0,
+                        calibrationReader.GetDouble(1)));
+                historyCount = checked((uint)samples.Count);
+                if (samples.Count > 0)
+                {
+                    var residual = samples.Average(sample => sample.Observed - sample.Predicted);
+                    var baseline = samples.Average(sample =>
+                        Math.Pow(sample.Predicted - sample.Observed, 2));
+                    var calibrated = samples.Average(sample =>
+                        Math.Pow(Math.Clamp(sample.Predicted + residual, 0, 1) - sample.Observed, 2));
+                    calibrationImprovement = baseline - calibrated;
+                }
+            }
+        }
         MathScheduleResult? mathSchedule = null;
         uint masteryBefore = 0, streakBefore = 0;
         ScheduleResult result;
         if (row.Kind == "memory_card")
         {
-            result = NativeScheduler.ReviewMemoryV2(
-                new ScheduleCard(row.State, row.Difficulty, row.StabilityDays, row.DueAt,
-                    row.LastReviewedAt, row.Repetitions, row.Lapses), rating, reviewedAt, preset);
+            var card = new ScheduleCard(row.State, row.Difficulty, row.StabilityDays, row.DueAt,
+                row.LastReviewedAt, row.Repetitions, row.Lapses);
+            result = preferences.SchedulerGeneration == 3
+                ? NativeScheduler.ReviewMemoryV3(card, rating, reviewedAt, preset,
+                    historyCount, calibrationImprovement, recentFailures)
+                : NativeScheduler.ReviewMemoryV2(card, rating, reviewedAt, preset);
         }
         else
         {
@@ -549,14 +633,20 @@ public sealed class AppRepository
                 _ => throw new ArgumentException("数学评分缺失") };
             var reason = errorReason switch { null => 0, "concept" => 1, "approach" => 2,
                 "calculation" => 3, "misread" => 4, "forgotten_fact" => 5, "timeout" => 6, _ => 7 };
-            mathSchedule = NativeScheduler.ReviewMathV2(masteryBefore, streakBefore, row.DueAt,
-                row.LastReviewedAt, scheduleRepetitions, feedback, reason, hintRevealed,
-                reviewedAt, intensity);
+            mathSchedule = preferences.SchedulerGeneration == 3
+                ? NativeScheduler.ReviewMathV3(masteryBefore, streakBefore, row.DueAt,
+                    row.LastReviewedAt, scheduleRepetitions, feedback, reason, hintRevealed,
+                    reviewedAt, intensity, checked((uint)Math.Max(0, durationSeconds)),
+                    durationQuality, recentFailures)
+                : NativeScheduler.ReviewMathV2(masteryBefore, streakBefore, row.DueAt,
+                    row.LastReviewedAt, scheduleRepetitions, feedback, reason, hintRevealed,
+                    reviewedAt, intensity);
             result = new ScheduleResult(new ScheduleCard(CardState.Review,
                 mathSchedule.MasteryLevel + 1, mathSchedule.ScheduledDays, mathSchedule.DueAt,
                 reviewedAt, mathSchedule.Repetitions,
                 row.Lapses + (uint)(feedback <= 1 ? 1 : 0)), 0,
-                mathSchedule.ScheduledDays, 0);
+                mathSchedule.ScheduledDays, 0, mathSchedule.AlgorithmVersion,
+                mathSchedule.ParameterVersion, mathSchedule.DecisionFlags);
         }
         var elapsed = row.LastReviewedAt == 0 ? 0 : (reviewedAt - row.LastReviewedAt) / 86400.0;
         var now = DateTimeOffset.UtcNow.ToUnixTimeSeconds();
@@ -576,59 +666,109 @@ public sealed class AppRepository
 
         await ExecuteAsync(connection, transaction, """
             UPDATE schedule_state_v2 SET due_at = $due, last_reviewed_at = $reviewed,
-              repetitions = $repetitions, needs_history_replay = 0, updated_at = $now
+              repetitions = $repetitions, needs_history_replay = 0,
+              active_algorithm_version = $algorithmVersion,
+              active_parameter_version = $parameterVersion, updated_at = $now
             WHERE study_item_id = $id
             """, ("$due", result.Card.DueAt), ("$reviewed", reviewedAt),
-            ("$repetitions", result.Card.Repetitions), ("$now", now), ("$id", row.Id));
+            ("$repetitions", result.Card.Repetitions),
+            ("$algorithmVersion", result.AlgorithmVersion),
+            ("$parameterVersion", result.ParameterVersion), ("$now", now), ("$id", row.Id));
         var eventId = NewId();
-        await ExecuteAsync(connection, transaction, """
-            INSERT INTO review_event_v2 (id, study_item_id, algorithm, algorithm_version,
-              parameter_version, preference, feedback, reviewed_at, duration_seconds,
-              due_at_before, due_at_after, device_id, created_at)
-            VALUES ($event, $id, $algorithm, 2, 1, $preference, $feedback, $reviewed,
-              $duration, $beforeDue, $afterDue, $device, $now)
-            """, ("$event", eventId), ("$id", row.Id),
-            ("$algorithm", row.Kind == "memory_card" ? "memory_fsrs_6" : "math_mastery_ladder"),
-            ("$preference", row.Kind == "memory_card" ? preferences.MemoryPreset : preferences.MathIntensity),
-            ("$feedback", row.Kind == "memory_card" ? (int)rating : mathSchedule!.AppliedFeedback),
-            ("$reviewed", reviewedAt), ("$duration", Math.Max(0, durationSeconds)),
-            ("$beforeDue", row.DueAt), ("$afterDue", result.Card.DueAt),
-            ("$device", Environment.MachineName), ("$now", now));
-        if (row.Kind == "memory_card")
+        var algorithm = row.Kind == "memory_card" ? "memory_fsrs_6" : "math_mastery_ladder";
+        var preference = row.Kind == "memory_card" ? preferences.MemoryPreset : preferences.MathIntensity;
+        var appliedFeedback = row.Kind == "memory_card" ? (int)rating : mathSchedule!.AppliedFeedback;
+        if (result.AlgorithmVersion == 3)
+        {
+            var snapshot = JsonSerializer.Serialize(new {
+                scheduledDays = result.ScheduledDays,
+                retrievabilityBefore = result.RetrievabilityBefore,
+                decisionFlags = result.DecisionFlags,
+                schedulerGeneration = preferences.SchedulerGeneration,
+            });
+            var quality = durationQuality switch { 2 => "too_short", 3 => "interrupted", _ => "reliable" };
+            var offset = checked((int)TimeZoneInfo.Local.GetUtcOffset(
+                DateTimeOffset.FromUnixTimeSeconds(reviewedAt)).TotalMinutes);
+            await ExecuteAsync(connection, transaction, """
+                INSERT INTO review_event_v3 (id, study_item_id, algorithm, algorithm_version,
+                  parameter_version, parameter_checksum, preference, feedback, reviewed_at,
+                  duration_seconds, duration_quality, client_timezone_offset_minutes,
+                  due_at_before, due_at_after, decision_flags, decision_snapshot_json,
+                  device_id, created_at)
+                VALUES ($event, $id, $algorithm, 3, $parameterVersion, $checksum,
+                  $preference, $feedback, $reviewed, $duration, $quality, $offset,
+                  $beforeDue, $afterDue, $flags, $snapshot, $device, $now)
+                """, ("$event", eventId), ("$id", row.Id), ("$algorithm", algorithm),
+                ("$parameterVersion", result.ParameterVersion),
+                ("$checksum", ParameterChecksum(algorithm, result.ParameterVersion)),
+                ("$preference", preference), ("$feedback", appliedFeedback),
+                ("$reviewed", reviewedAt), ("$duration", Math.Max(0, durationSeconds)),
+                ("$quality", quality), ("$offset", offset), ("$beforeDue", row.DueAt),
+                ("$afterDue", result.Card.DueAt), ("$flags", result.DecisionFlags),
+                ("$snapshot", snapshot), ("$device", Environment.MachineName), ("$now", now));
+        }
+        else
         {
             await ExecuteAsync(connection, transaction, """
+                INSERT INTO review_event_v2 (id, study_item_id, algorithm, algorithm_version,
+                  parameter_version, preference, feedback, reviewed_at, duration_seconds,
+                  due_at_before, due_at_after, device_id, created_at)
+                VALUES ($event, $id, $algorithm, 2, 1, $preference, $feedback, $reviewed,
+                  $duration, $beforeDue, $afterDue, $device, $now)
+                """, ("$event", eventId), ("$id", row.Id), ("$algorithm", algorithm),
+                ("$preference", preference), ("$feedback", appliedFeedback),
+                ("$reviewed", reviewedAt), ("$duration", Math.Max(0, durationSeconds)),
+                ("$beforeDue", row.DueAt), ("$afterDue", result.Card.DueAt),
+                ("$device", Environment.MachineName), ("$now", now));
+        }
+        if (row.Kind == "memory_card")
+        {
+            var memoryEventTable = result.AlgorithmVersion == 3
+                ? "memory_review_event_v3" : "memory_review_event_v2";
+            var memoryV3Columns = result.AlgorithmVersion == 3
+                ? ", personalized, learning_step, overdue_days" : "";
+            var memoryV3Values = result.AlgorithmVersion == 3
+                ? ", $personalized, $learningStep, $overdue" : "";
+            await ExecuteAsync(connection, transaction, $$"""
                 UPDATE memory_schedule_state SET state = $state, difficulty = $difficulty,
                   stability_days = $stability, lapses = $lapses WHERE study_item_id = $id;
-                INSERT INTO memory_review_event_v2 (review_event_id, state_before, state_after,
+                INSERT INTO {{memoryEventTable}} (review_event_id, state_before, state_after,
                   target_retention, elapsed_days, scheduled_days, retrievability_before,
-                  difficulty_before, difficulty_after, stability_before, stability_after)
+                  difficulty_before, difficulty_after, stability_before, stability_after{{memoryV3Columns}})
                 VALUES ($event, $before, $after, $retention, $elapsed, $scheduled,
-                  $retrievability, $difficultyBefore, $difficultyAfter, $stabilityBefore, $stabilityAfter)
+                  $retrievability, $difficultyBefore, $difficultyAfter, $stabilityBefore,
+                  $stabilityAfter{{memoryV3Values}})
                 """, ("$state", (int)result.Card.State), ("$difficulty", result.Card.Difficulty),
                 ("$stability", result.Card.StabilityDays), ("$lapses", result.Card.Lapses),
                 ("$id", row.Id), ("$event", eventId), ("$before", (int)row.State),
                 ("$after", (int)result.Card.State),
-                ("$retention", preset switch { 0 => 0.85, 2 => 0.93, _ => 0.90 }),
+                ("$retention", result.TargetRetention),
                 ("$elapsed", elapsed), ("$scheduled", result.ScheduledDays),
                 ("$retrievability", result.RetrievabilityBefore),
                 ("$difficultyBefore", row.Difficulty), ("$difficultyAfter", result.Card.Difficulty),
-                ("$stabilityBefore", row.StabilityDays), ("$stabilityAfter", result.Card.StabilityDays));
+                ("$stabilityBefore", row.StabilityDays), ("$stabilityAfter", result.Card.StabilityDays),
+                ("$personalized", result.Personalized ? 1 : 0),
+                ("$learningStep", result.LearningStep ? 1 : 0), ("$overdue", result.OverdueDays));
         }
         if (row.Kind == "math_problem" && mathResult is not null)
         {
             var attemptId = NewId();
-            await ExecuteAsync(connection, transaction, """
+            var mathEventTable = result.AlgorithmVersion == 3
+                ? "math_review_event_v3" : "math_review_event_v2";
+            var mathV3Column = result.AlgorithmVersion == 3 ? ", consecutive_failures" : "";
+            var mathV3Value = result.AlgorithmVersion == 3 ? ", $consecutiveFailures" : "";
+            await ExecuteAsync(connection, transaction, $$"""
                 INSERT INTO attempt (
                   id, math_problem_id, started_at, finished_at, result, error_reason, created_at
                 ) VALUES ($attempt, $id, $started, $finished, $result, $reason, $now);
                 UPDATE math_schedule_state SET mastery_level = $mastery,
                   fluent_streak = $streak WHERE study_item_id = $id;
-                INSERT INTO math_review_event_v2 (review_event_id, attempt_id,
+                INSERT INTO {{mathEventTable}} (review_event_id, attempt_id,
                   requested_feedback, applied_feedback, error_reason, hint_revealed,
                   mastery_before, mastery_after, fluent_streak_before,
-                  fluent_streak_after, scheduled_days)
+                  fluent_streak_after, scheduled_days{{mathV3Column}})
                 VALUES ($event, $attempt, $requested, $applied, $reason, $hint,
-                  $masteryBefore, $mastery, $streakBefore, $streak, $scheduled)
+                  $masteryBefore, $mastery, $streakBefore, $streak, $scheduled{{mathV3Value}})
                 """, ("$attempt", attemptId), ("$id", row.Id),
                 ("$started", reviewedAt - Math.Max(0, durationSeconds)),
                 ("$finished", reviewedAt), ("$result", mathResult),
@@ -638,7 +778,8 @@ public sealed class AppRepository
                     "again" => 0, "wrong" => 1, "effortful" => 2, _ => 3 }),
                 ("$applied", mathSchedule.AppliedFeedback), ("$hint", hintRevealed ? 1 : 0),
                 ("$masteryBefore", masteryBefore), ("$streakBefore", streakBefore),
-                ("$scheduled", mathSchedule.ScheduledDays));
+                ("$scheduled", mathSchedule.ScheduledDays),
+                ("$consecutiveFailures", recentFailures));
         }
         await transaction.CommitAsync();
         return result;
@@ -673,10 +814,10 @@ public sealed class AppRepository
         var manifest = JsonSerializer.Serialize(new
         {
             format = "reviewfault-backup",
-            version = 2,
+            version = 3,
             appVersion = AppVersion,
-            schemaVersion = 2,
-            schedulerAbiVersion = 2,
+            schemaVersion = 3,
+            schedulerAbiVersion = 3,
             exportedAt = DateTimeOffset.UtcNow.ToUnixTimeSeconds(),
             files = manifestFiles,
         }, new JsonSerializerOptions { WriteIndented = true });
@@ -740,7 +881,8 @@ public sealed class AppRepository
             var abiVersion = root.GetProperty("schedulerAbiVersion").GetInt32();
             if (root.GetProperty("format").GetString() != "reviewfault-backup" ||
                 !((backupVersion == 1 && schemaVersion == 1 && abiVersion == 1) ||
-                  (backupVersion == 2 && schemaVersion == 2 && abiVersion == 2)))
+                  (backupVersion == 2 && schemaVersion == 2 && abiVersion == 2) ||
+                  (backupVersion == 3 && schemaVersion == 3 && abiVersion == 3)))
                 throw new InvalidDataException("不是受支持的 ReviewFault 备份");
             var listedFiles = new HashSet<string>(StringComparer.Ordinal);
             long listedBytes = 0;
@@ -786,10 +928,17 @@ public sealed class AppRepository
                     await command.ExecuteNonQueryAsync();
                     restoredVersion = 2;
                 }
+                if (restoredVersion == 2)
+                {
+                    command.CommandText = await File.ReadAllTextAsync(Path.Combine(
+                        AppContext.BaseDirectory, "schema", "003_v0_3.sql"));
+                    await command.ExecuteNonQueryAsync();
+                    restoredVersion = 3;
+                }
                 command.CommandText = "PRAGMA integrity_check";
                 if ((string?)await command.ExecuteScalarAsync() != "ok")
                     throw new InvalidDataException("备份数据库完整性检查失败");
-                if (restoredVersion != 2)
+                if (restoredVersion != 3)
                     throw new InvalidDataException("备份数据库版本不兼容");
                 command.CommandText = "PRAGMA foreign_key_check";
                 await using var invalidReferences = await command.ExecuteReaderAsync();
@@ -853,6 +1002,15 @@ public sealed class AppRepository
         var hash = await SHA256.HashDataAsync(input);
         return Convert.ToHexString(hash).ToLowerInvariant();
     }
+
+    private static string ParameterChecksum(string algorithm, uint parameterVersion) =>
+        (algorithm, parameterVersion) switch
+        {
+            ("memory_fsrs_6", 2) => "bd98e3fdf07a9223a39b5305fe5c14e8d9a03013ddbbce3f5d9ea15555c9c177",
+            ("memory_fsrs_6", 3) => "083f217e835490d1760ee5bfc94693b1b4fb827e3ed121cbd970f401d6271019",
+            ("math_mastery_ladder", 2) => "229003e5c13709bb8af1443b1d4585a025dc92db742520a82740d01a4fe9c089",
+            _ => throw new InvalidOperationException("未知的调度参数版本"),
+        };
 
     private static string NewId()
     {

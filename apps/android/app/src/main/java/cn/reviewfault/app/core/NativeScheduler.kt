@@ -20,6 +20,36 @@ data class NativeMathScheduleResult(
     val appliedFeedback: Int,
 )
 
+data class NativeScheduleResultV3(
+    val state: Int,
+    val difficulty: Double,
+    val stabilityDays: Double,
+    val dueAt: Long,
+    val repetitions: Int,
+    val lapses: Int,
+    val scheduledDays: Double,
+    val retrievabilityBefore: Double,
+    val algorithmVersion: Int,
+    val parameterVersion: Int,
+    val decisionFlags: Int,
+    val targetRetention: Double,
+    val personalized: Boolean,
+    val learningStep: Boolean,
+    val overdueDays: Double,
+)
+
+data class NativeMathScheduleResultV3(
+    val masteryLevel: Int,
+    val fluentStreak: Int,
+    val dueAt: Long,
+    val repetitions: Int,
+    val scheduledDays: Double,
+    val appliedFeedback: Int,
+    val algorithmVersion: Int,
+    val parameterVersion: Int,
+    val decisionFlags: Int,
+)
+
 object NativeScheduler {
     init {
         System.loadLibrary("reviewfault")
@@ -36,7 +66,7 @@ object NativeScheduler {
         }
     }
 
-    private const val EXPECTED_ABI_VERSION = 2
+    private const val EXPECTED_ABI_VERSION = 3
 
     external fun nativeAbiVersion(): Int
 
@@ -78,4 +108,36 @@ object NativeScheduler {
         reviewedAt: Long,
         intensity: Int,
     ): NativeMathScheduleResult
+
+    external fun nativeReviewMemoryV3(
+        state: Int,
+        difficulty: Double,
+        stabilityDays: Double,
+        dueAt: Long,
+        lastReviewedAt: Long,
+        repetitions: Int,
+        lapses: Int,
+        rating: Int,
+        reviewedAt: Long,
+        preset: Int,
+        historyEventCount: Int,
+        calibrationImprovement: Double,
+        consecutiveLapses: Int,
+    ): NativeScheduleResultV3
+
+    external fun nativeReviewMathV3(
+        masteryLevel: Int,
+        fluentStreak: Int,
+        dueAt: Long,
+        lastReviewedAt: Long,
+        repetitions: Int,
+        feedback: Int,
+        errorReason: Int,
+        hintRevealed: Boolean,
+        reviewedAt: Long,
+        intensity: Int,
+        durationSeconds: Int,
+        durationQuality: Int,
+        consecutiveFailures: Int,
+    ): NativeMathScheduleResultV3
 }

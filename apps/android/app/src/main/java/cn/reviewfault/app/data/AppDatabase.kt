@@ -60,6 +60,7 @@ data class LearningPreferences(
     val includeMathProblems: Boolean = true,
     val memoryPreset: String = "balanced",
     val mathIntensity: String = "balanced",
+    val schedulerGeneration: Int = 3,
 )
 
 data class LibraryFilter(
@@ -78,8 +79,9 @@ data class LibraryFilter(
 data class DeletionState(val itemIds: List<String>, val deletedAt: Long, val undoUntil: Long)
 
 class AppDatabase private constructor(context: Context) :
-    SQLiteOpenHelper(context, "reviewfault.db", null, 2) {
+    SQLiteOpenHelper(context, "reviewfault.db", null, 3) {
     // v1 review_log is intentionally read-only and is consulted only by lazy history replay.
+    // v3 parameter checksums are foreign-keyed to algorithm_parameter_registry.
 
     private val appContext = context.applicationContext
     private val deviceId: String by lazy {
@@ -97,6 +99,7 @@ class AppDatabase private constructor(context: Context) :
     override fun onCreate(db: SQLiteDatabase) {
         applyMigration(db, "001_initial.sql")
         applyMigration(db, "002_v0_2.sql")
+        applyMigration(db, "003_v0_3.sql")
     }
 
     override fun onUpgrade(db: SQLiteDatabase, oldVersion: Int, newVersion: Int) {
@@ -104,6 +107,10 @@ class AppDatabase private constructor(context: Context) :
         if (current < 2 && newVersion >= 2) {
             applyMigration(db, "002_v0_2.sql")
             current = 2
+        }
+        if (current < 3 && newVersion >= 3) {
+            applyMigration(db, "003_v0_3.sql")
+            current = 3
         }
         check(current == newVersion) { "缺少数据库迁移：$oldVersion -> $newVersion" }
     }
@@ -124,9 +131,12 @@ class AppDatabase private constructor(context: Context) :
               COALESCE(SUM(CASE WHEN s.scheduler_state <> 0 AND s.due_at <= ?
                 THEN CASE WHEN s.kind = 'math_problem' THEN 480 ELSE 45 END ELSE 0 END), 0),
               lp.daily_new_memory_limit,
-              (SELECT COUNT(*) FROM review_event_v2 e
+              ((SELECT COUNT(*) FROM review_event_v2 e
                JOIN memory_review_event_v2 mr ON mr.review_event_id = e.id
-               WHERE mr.state_before = 0 AND e.reviewed_at >= ?)
+               WHERE mr.state_before = 0 AND e.reviewed_at >= ?) +
+               (SELECT COUNT(*) FROM review_event_v3 e
+                JOIN memory_review_event_v3 mr ON mr.review_event_id = e.id
+                WHERE mr.state_before = 0 AND e.reviewed_at >= ?))
             FROM learning_preferences lp
             LEFT JOIN study_item s ON s.suspended_at IS NULL AND s.deleted_at IS NULL AND (
               (s.kind = 'math_problem' AND lp.include_math_problems = 1) OR
@@ -138,7 +148,7 @@ class AppDatabase private constructor(context: Context) :
             WHERE lp.singleton = 1
             """.trimIndent(),
             arrayOf(dayStart.toString(), dayStart.toString(), now.toString(), now.toString(),
-                dayStart.toString()),
+                dayStart.toString(), dayStart.toString()),
         ).use { cursor ->
             cursor.moveToFirst()
             val remainingNewMemory = (cursor.getInt(5) - cursor.getInt(6)).coerceAtLeast(0)
@@ -184,21 +194,32 @@ class AppDatabase private constructor(context: Context) :
                   (s.subject = 'computer_networks' AND lp.enable_computer_networks = 1))))
               AND ((s.scheduler_state <> 0 AND s.due_at <= ?)
                 OR (s.scheduler_state = 0 AND (s.kind = 'math_problem' OR (
-                  SELECT COUNT(*) FROM review_event_v2 e
-                  JOIN memory_review_event_v2 mr ON mr.review_event_id = e.id
-                  WHERE mr.state_before = 0 AND e.reviewed_at >= ?
+                  SELECT
+                    (SELECT COUNT(*) FROM review_event_v2 e
+                     JOIN memory_review_event_v2 mr ON mr.review_event_id = e.id
+                     WHERE mr.state_before = 0 AND e.reviewed_at >= ?) +
+                    (SELECT COUNT(*) FROM review_event_v3 e
+                     JOIN memory_review_event_v3 mr ON mr.review_event_id = e.id
+                     WHERE mr.state_before = 0 AND e.reviewed_at >= ?)
                 ) < lp.daily_new_memory_limit)))
             ORDER BY
               CASE WHEN s.scheduler_state <> 0 AND s.due_at < ? THEN 0
                    WHEN s.scheduler_state <> 0 THEN 1 ELSE 2 END,
               CASE WHEN s.scheduler_state <> 0 AND s.due_at < ?
                    THEN CASE WHEN s.kind = 'memory_card' THEN 0 ELSE 1 END ELSE 0 END,
+              CASE WHEN s.kind = 'math_problem' AND s.chapter_id IS NOT NULL AND
+                s.chapter_id = (SELECT previous.chapter_id FROM study_item previous
+                  WHERE previous.id = (SELECT study_item_id FROM (
+                    SELECT study_item_id, reviewed_at FROM review_event_v3
+                    UNION ALL SELECT study_item_id, reviewed_at FROM review_event_v2
+                  ) ORDER BY reviewed_at DESC LIMIT 1)) THEN 1 ELSE 0 END,
               CASE WHEN s.kind = 'memory_card' THEN 0 ELSE 1 END,
               s.due_at,
               s.created_at
             LIMIT 1
             """.trimIndent(),
-            arrayOf(now.toString(), dayStart.toString(), dayStart.toString(), dayStart.toString()),
+            arrayOf(now.toString(), dayStart.toString(), dayStart.toString(),
+                dayStart.toString(), dayStart.toString()),
         ).use { cursor ->
             return if (cursor.moveToFirst()) cursor.toStudyRow() else null
         }
@@ -287,6 +308,7 @@ class AppDatabase private constructor(context: Context) :
             cursor.getInt(cursor.getColumnIndexOrThrow("include_math_problems")) != 0,
             cursor.getString(cursor.getColumnIndexOrThrow("memory_preset")),
             cursor.getString(cursor.getColumnIndexOrThrow("math_intensity")),
+            cursor.getInt(cursor.getColumnIndexOrThrow("scheduler_generation")),
         )
     }
 
@@ -295,6 +317,7 @@ class AppDatabase private constructor(context: Context) :
         require(value.includeMemoryCards || value.includeMathProblems)
         require(value.memoryPreset in setOf("time_saving", "balanced", "reinforced"))
         require(value.mathIntensity in setOf("intensive", "balanced", "relaxed"))
+        require(value.schedulerGeneration in 2..3)
         writableDatabase.update("learning_preferences", ContentValues().apply {
             put("daily_new_memory_limit", value.dailyNewMemoryLimit)
             put("session_minutes", value.sessionMinutes)
@@ -306,6 +329,7 @@ class AppDatabase private constructor(context: Context) :
             put("include_math_problems", value.includeMathProblems.toInt())
             put("memory_preset", value.memoryPreset)
             put("math_intensity", value.mathIntensity)
+            put("scheduler_generation", value.schedulerGeneration)
             put("updated_at", Instant.now().epochSecond)
         }, "singleton = 1", null)
     }
@@ -547,8 +571,72 @@ class AppDatabase private constructor(context: Context) :
         var mathNative: cn.reviewfault.app.core.NativeMathScheduleResult? = null
         var mathMasteryBefore = 0
         var mathStreakBefore = 0
+        var algorithmVersion = 2
+        var parameterVersion = 1
+        var decisionFlags = 0
+        var targetRetention = listOf(0.85, 0.90, 0.93)[memoryPreset]
+        var personalized = false
+        var learningStep = false
+        var overdueDays = 0.0
+        val durationQuality = when {
+            durationSeconds < 5 -> 2
+            durationSeconds > 3600 -> 3
+            else -> 1
+        }
+        val recentFailures = if (preferences.schedulerGeneration == 3) {
+            readableDatabase.rawQuery(
+                """SELECT COUNT(*) FROM (
+                    SELECT feedback FROM (
+                      SELECT feedback, reviewed_at FROM review_event_v3 WHERE study_item_id = ?
+                      UNION ALL
+                      SELECT feedback, reviewed_at FROM review_event_v2 WHERE study_item_id = ?
+                    ) ORDER BY reviewed_at DESC LIMIT 4
+                  ) WHERE feedback <= ?""",
+                arrayOf(row.id, row.id, "1"),
+            ).use { cursor -> cursor.moveToFirst(); cursor.getInt(0) }
+        } else 0
         val result = if (row.kind == "memory_card") {
-            NativeScheduler.nativeReviewMemoryV2(
+            if (preferences.schedulerGeneration == 3) {
+                val calibrationRows = readableDatabase.rawQuery(
+                    """SELECT e.feedback, m.retrievability_before
+                       FROM review_event_v2 e JOIN memory_review_event_v2 m ON m.review_event_id = e.id
+                       UNION ALL
+                       SELECT e.feedback, m.retrievability_before
+                       FROM review_event_v3 e JOIN memory_review_event_v3 m ON m.review_event_id = e.id""",
+                    null,
+                ).use { cursor -> buildList {
+                    while (cursor.moveToNext()) add((if (cursor.getInt(0) > 1) 1.0 else 0.0) to cursor.getDouble(1))
+                } }
+                val residual = if (calibrationRows.isEmpty()) 0.0 else calibrationRows
+                    .sumOf { (observed, predicted) -> observed - predicted } / calibrationRows.size
+                val baselineError = calibrationRows.sumOf { (observed, predicted) ->
+                    (predicted - observed) * (predicted - observed)
+                }
+                val calibratedError = calibrationRows.sumOf { (observed, predicted) ->
+                    val adjusted = (predicted + residual).coerceIn(0.0, 1.0)
+                    (adjusted - observed) * (adjusted - observed)
+                }
+                val calibrationImprovement = if (calibrationRows.isEmpty()) 0.0
+                    else (baselineError - calibratedError) / calibrationRows.size
+                val native = NativeScheduler.nativeReviewMemoryV3(
+                    row.state, row.difficulty, row.stabilityDays, row.dueAt,
+                    row.lastReviewedAt, row.repetitions, row.lapses,
+                    rating, reviewedAt, memoryPreset, calibrationRows.size,
+                    calibrationImprovement, recentFailures,
+                )
+                algorithmVersion = native.algorithmVersion
+                parameterVersion = native.parameterVersion
+                decisionFlags = native.decisionFlags
+                targetRetention = native.targetRetention
+                personalized = native.personalized
+                learningStep = native.learningStep
+                overdueDays = native.overdueDays
+                NativeScheduleResult(
+                    native.state, native.difficulty, native.stabilityDays, native.dueAt,
+                    native.repetitions, native.lapses, native.scheduledDays,
+                    native.retrievabilityBefore,
+                )
+            } else NativeScheduler.nativeReviewMemoryV2(
                 row.state, row.difficulty, row.stabilityDays, row.dueAt,
                 row.lastReviewedAt, row.repetitions, row.lapses,
                 rating, reviewedAt, memoryPreset,
@@ -573,12 +661,27 @@ class AppDatabase private constructor(context: Context) :
                 null -> 0; "concept" -> 1; "approach" -> 2; "calculation" -> 3
                 "misread" -> 4; "forgotten_fact" -> 5; "timeout" -> 6; else -> 7
             }
-            mathNative = NativeScheduler.nativeReviewMathV2(
+            val math = if (preferences.schedulerGeneration == 3) {
+                NativeScheduler.nativeReviewMathV3(
+                    mathMasteryBefore, mathStreakBefore, row.dueAt, row.lastReviewedAt,
+                    mathRepetitions, feedback, reason, hintRevealed, reviewedAt,
+                    mathIntensity, durationSeconds.coerceAtLeast(0), durationQuality,
+                    recentFailures,
+                ).also {
+                    algorithmVersion = it.algorithmVersion
+                    parameterVersion = it.parameterVersion
+                    decisionFlags = it.decisionFlags
+                }.let {
+                    cn.reviewfault.app.core.NativeMathScheduleResult(
+                        it.masteryLevel, it.fluentStreak, it.dueAt, it.repetitions,
+                        it.scheduledDays, it.appliedFeedback,
+                    )
+                }
+            } else NativeScheduler.nativeReviewMathV2(
                 mathMasteryBefore, mathStreakBefore, row.dueAt, row.lastReviewedAt,
-                mathRepetitions, feedback,
-                reason, hintRevealed, reviewedAt, mathIntensity,
+                mathRepetitions, feedback, reason, hintRevealed, reviewedAt, mathIntensity,
             )
-            val math = mathNative!!
+            mathNative = math
             NativeScheduleResult(
                 2, (math.masteryLevel + 1).toDouble(), math.scheduledDays,
                 math.dueAt, math.repetitions, row.lapses + if (feedback <= 1) 1 else 0,
@@ -603,9 +706,11 @@ class AppDatabase private constructor(context: Context) :
             check(updated == 1) { "内容已在其他会话中更新，请刷新后重试" }
 
             execSQL("""UPDATE schedule_state_v2 SET due_at = ?, last_reviewed_at = ?,
-                repetitions = ?, needs_history_replay = 0, updated_at = ?
+                repetitions = ?, needs_history_replay = 0, active_algorithm_version = ?,
+                active_parameter_version = ?, updated_at = ?
                 WHERE study_item_id = ?""",
-                arrayOf<Any>(result.dueAt, reviewedAt, result.repetitions, now, row.id))
+                arrayOf<Any>(result.dueAt, reviewedAt, result.repetitions, algorithmVersion,
+                    parameterVersion, now, row.id))
             if (row.kind == "memory_card") {
                 execSQL("""UPDATE memory_schedule_state SET state = ?, difficulty = ?,
                     stability_days = ?, lapses = ? WHERE study_item_id = ?""",
@@ -617,31 +722,58 @@ class AppDatabase private constructor(context: Context) :
             }
 
             val eventId = uuidV7()
-            insertOrThrow("review_event_v2", null, ContentValues().apply {
-                put("id", eventId)
-                put("study_item_id", row.id)
-                put("algorithm", if (row.kind == "memory_card") "memory_fsrs_6" else "math_mastery_ladder")
-                put("algorithm_version", 2)
-                put("parameter_version", 1)
-                put("preference", if (row.kind == "memory_card") preferences.memoryPreset else preferences.mathIntensity)
-                put("feedback", if (row.kind == "memory_card") rating else mathNative!!.appliedFeedback)
-                put("reviewed_at", reviewedAt)
-                put("duration_seconds", durationSeconds.coerceAtLeast(0))
-                put("due_at_before", row.dueAt)
-                put("due_at_after", result.dueAt)
-                put("device_id", deviceId)
-                put("created_at", now)
-            })
+            val algorithm = if (row.kind == "memory_card") "memory_fsrs_6" else "math_mastery_ladder"
+            val preference = if (row.kind == "memory_card") preferences.memoryPreset else preferences.mathIntensity
+            val appliedFeedback = if (row.kind == "memory_card") rating else mathNative!!.appliedFeedback
+            if (algorithmVersion == 3) {
+                val checksum = parameterChecksum(algorithm, parameterVersion)
+                val qualityLabel = listOf("unknown", "reliable", "too_short", "interrupted")[durationQuality]
+                val timezoneOffset = ZoneId.systemDefault().rules
+                    .getOffset(Instant.ofEpochSecond(reviewedAt)).totalSeconds / 60
+                val snapshot = JSONObject().apply {
+                    put("scheduledDays", result.scheduledDays)
+                    put("retrievabilityBefore", result.retrievabilityBefore)
+                    put("decisionFlags", decisionFlags)
+                    put("schedulerGeneration", preferences.schedulerGeneration)
+                }.toString()
+                insertOrThrow("review_event_v3", null, ContentValues().apply {
+                    put("id", eventId); put("study_item_id", row.id); put("algorithm", algorithm)
+                    put("algorithm_version", algorithmVersion); put("parameter_version", parameterVersion)
+                    put("parameter_checksum", checksum); put("preference", preference)
+                    put("feedback", appliedFeedback); put("reviewed_at", reviewedAt)
+                    put("duration_seconds", durationSeconds.coerceAtLeast(0))
+                    put("duration_quality", qualityLabel)
+                    put("client_timezone_offset_minutes", timezoneOffset)
+                    put("due_at_before", row.dueAt); put("due_at_after", result.dueAt)
+                    put("decision_flags", decisionFlags); put("decision_snapshot_json", snapshot)
+                    put("device_id", deviceId); put("created_at", now)
+                })
+            } else {
+                insertOrThrow("review_event_v2", null, ContentValues().apply {
+                    put("id", eventId); put("study_item_id", row.id); put("algorithm", algorithm)
+                    put("algorithm_version", 2); put("parameter_version", 1)
+                    put("preference", preference); put("feedback", appliedFeedback)
+                    put("reviewed_at", reviewedAt); put("duration_seconds", durationSeconds.coerceAtLeast(0))
+                    put("due_at_before", row.dueAt); put("due_at_after", result.dueAt)
+                    put("device_id", deviceId); put("created_at", now)
+                })
+            }
 
             if (row.kind == "memory_card") {
-                insertOrThrow("memory_review_event_v2", null, ContentValues().apply {
+                insertOrThrow(if (algorithmVersion == 3) "memory_review_event_v3" else "memory_review_event_v2",
+                    null, ContentValues().apply {
                     put("review_event_id", eventId); put("state_before", row.state)
                     put("state_after", result.state)
-                    put("target_retention", listOf(0.85, 0.90, 0.93)[memoryPreset])
+                    put("target_retention", targetRetention)
                     put("elapsed_days", elapsedDays); put("scheduled_days", result.scheduledDays)
                     put("retrievability_before", result.retrievabilityBefore)
                     put("difficulty_before", row.difficulty); put("difficulty_after", result.difficulty)
                     put("stability_before", row.stabilityDays); put("stability_after", result.stabilityDays)
+                    if (algorithmVersion == 3) {
+                        put("personalized", personalized.toInt())
+                        put("learning_step", learningStep.toInt())
+                        put("overdue_days", overdueDays)
+                    }
                 })
             } else if (mathAttemptResult != null) {
                 val attemptId = uuidV7()
@@ -654,7 +786,8 @@ class AppDatabase private constructor(context: Context) :
                     if (errorReason == null) putNull("error_reason") else put("error_reason", errorReason)
                     put("created_at", now)
                 })
-                insertOrThrow("math_review_event_v2", null, ContentValues().apply {
+                insertOrThrow(if (algorithmVersion == 3) "math_review_event_v3" else "math_review_event_v2",
+                    null, ContentValues().apply {
                     val requested = when (mathAttemptResult) {
                         "again" -> 0; "wrong" -> 1; "effortful" -> 2; else -> 3
                     }
@@ -666,6 +799,7 @@ class AppDatabase private constructor(context: Context) :
                     put("mastery_after", mathNative!!.masteryLevel)
                     put("fluent_streak_before", mathStreakBefore)
                     put("fluent_streak_after", mathNative!!.fluentStreak)
+                    if (algorithmVersion == 3) put("consecutive_failures", recentFailures)
                     put("scheduled_days", mathNative!!.scheduledDays)
                 })
             }
@@ -700,10 +834,10 @@ class AppDatabase private constructor(context: Context) :
         }
         val manifest = JSONObject().apply {
             put("format", "reviewfault-backup")
-            put("version", 2)
+            put("version", 3)
             put("appVersion", BuildConfig.VERSION_NAME)
-            put("schemaVersion", 2)
-            put("schedulerAbiVersion", 2)
+            put("schemaVersion", 3)
+            put("schedulerAbiVersion", 3)
             put("exportedAt", Instant.now().epochSecond)
             put("files", manifestFiles)
         }.toString(2)
@@ -765,7 +899,8 @@ class AppDatabase private constructor(context: Context) :
             val abiVersion = manifest.getInt("schedulerAbiVersion")
             require(manifest.getString("format") == "reviewfault-backup" &&
                 ((backupVersion == 1 && schemaVersion == 1 && abiVersion == 1) ||
-                    (backupVersion == 2 && schemaVersion == 2 && abiVersion == 2))
+                    (backupVersion == 2 && schemaVersion == 2 && abiVersion == 2) ||
+                    (backupVersion == 3 && schemaVersion == 3 && abiVersion == 3))
             ) { "不是受支持的 ReviewFault 备份" }
             val listed = manifest.getJSONArray("files")
             val listedFiles = mutableSetOf<String>()
@@ -801,7 +936,11 @@ class AppDatabase private constructor(context: Context) :
                     applyMigration(checkDb, "002_v0_2.sql")
                     checkDb.version = 2
                 }
-                require(checkDb.version == 2) { "备份数据库版本不兼容" }
+                if (checkDb.version == 2) {
+                    applyMigration(checkDb, "003_v0_3.sql")
+                    checkDb.version = 3
+                }
+                require(checkDb.version == 3) { "备份数据库版本不兼容" }
                 checkDb.rawQuery("PRAGMA integrity_check", null).use { cursor ->
                     require(cursor.moveToFirst() && cursor.getString(0) == "ok") {
                         "备份数据库完整性检查失败"
@@ -835,7 +974,7 @@ class AppDatabase private constructor(context: Context) :
             val restoredMedia = File(restoreRoot, "media")
             if (restoredMedia.exists()) restoredMedia.copyRecursively(mediaDirectory, overwrite = true)
             readableDatabase.rawQuery("SELECT schema_version FROM schema_metadata", null).use {
-                require(it.moveToFirst() && it.getInt(0) == 2) { "恢复后的数据库无法打开" }
+                require(it.moveToFirst() && it.getInt(0) == 3) { "恢复后的数据库无法打开" }
             }
         } catch (error: Exception) {
             close()
@@ -910,6 +1049,16 @@ class AppDatabase private constructor(context: Context) :
         ) { value ->
             "\"" + value.replace("\\", "\\\\").replace("\"", "\\\"")
                 .replace("\n", "\\n") + "\""
+        }
+
+        private fun parameterChecksum(algorithm: String, parameterVersion: Int): String = when {
+            algorithm == "memory_fsrs_6" && parameterVersion == 2 ->
+                "bd98e3fdf07a9223a39b5305fe5c14e8d9a03013ddbbce3f5d9ea15555c9c177"
+            algorithm == "memory_fsrs_6" && parameterVersion == 3 ->
+                "083f217e835490d1760ee5bfc94693b1b4fb827e3ed121cbd970f401d6271019"
+            algorithm == "math_mastery_ladder" && parameterVersion == 2 ->
+                "229003e5c13709bb8af1443b1d4585a025dc92db742520a82740d01a4fe9c089"
+            else -> error("未知的调度参数版本")
         }
 
         private fun sha256(file: File): String {

@@ -504,6 +504,9 @@ private fun SettingsScreen(state: AppUiState, model: AppViewModel) {
     var minutes by remember(state.preferences) { mutableStateOf(state.preferences.sessionMinutes.toString()) }
     var memoryPreset by remember(state.preferences) { mutableStateOf(state.preferences.memoryPreset) }
     var mathIntensity by remember(state.preferences) { mutableStateOf(state.preferences.mathIntensity) }
+    var schedulerGeneration by remember(state.preferences) {
+        mutableIntStateOf(state.preferences.schedulerGeneration)
+    }
     var includeMemory by remember(state.preferences) { mutableStateOf(state.preferences.includeMemoryCards) }
     var includeMath by remember(state.preferences) { mutableStateOf(state.preferences.includeMathProblems) }
     var subjects by remember(state.preferences) { mutableStateOf(state.preferences.enabledSubjects) }
@@ -547,6 +550,16 @@ private fun SettingsScreen(state: AppUiState, model: AppViewModel) {
                 }
                 ChoiceRow("408 节奏", listOf("time_saving" to "省时", "balanced" to "均衡", "reinforced" to "强化"), memoryPreset) { memoryPreset = it }
                 ChoiceRow("数学节奏", listOf("intensive" to "密集", "balanced" to "均衡", "relaxed" to "舒缓"), mathIntensity) { mathIntensity = it }
+                PreferenceSwitch(
+                    "使用 v0.3 调度",
+                    schedulerGeneration == 3,
+                ) { schedulerGeneration = if (it) 3 else 2 }
+                Text(
+                    if (schedulerGeneration == 3) "记录 v3 决策快照，可随时切回 v0.2 参数"
+                    else "继续使用冻结的 v0.2 参数；历史事件不会被改写",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
             }
         }
         item {
@@ -607,6 +620,7 @@ private fun SettingsScreen(state: AppUiState, model: AppViewModel) {
                             sessionMinutes = minutes.toIntOrNull() ?: 0,
                             memoryPreset = memoryPreset,
                             mathIntensity = mathIntensity,
+                            schedulerGeneration = schedulerGeneration,
                             enabledSubjects = subjects,
                             includeMemoryCards = includeMemory,
                             includeMathProblems = includeMath,

@@ -45,12 +45,23 @@ try
         next!.Kind == "math_problem" ? "effortful" : null);
     Require(result.Card.State == CardState.Review, "Good graduates the item to review");
     Require(result.Card.DueAt > reviewedAt, "review produces a future due time");
+    var mathRow = (await repository.SearchAsync("集成测试")).Single(item => item.Id == mathId);
+    var mathReview = await repository.ReviewAsync(mathRow, Rating.Good, reviewedAt + 1, 90,
+        "effortful", null, false);
+    Require(mathReview.AlgorithmVersion == 3 && mathReview.ScheduledDays > 0,
+        "math review uses the v3 ABI and persists decision metadata");
     await repository.ReplaceTagsAsync(cardId, new[] { "进程", "易混" });
     var preferences = await repository.GetLearningPreferencesAsync();
     await repository.SaveLearningPreferencesAsync(preferences with {
         DailyNewMemoryLimit = 12, MathIntensity = "intensive" });
     Require((await repository.GetLearningPreferencesAsync()).DailyNewMemoryLimit == 12,
-        "learning settings persist in schema v2");
+        "learning settings persist in schema v3");
+    await repository.SaveLearningPreferencesAsync((await repository.GetLearningPreferencesAsync()) with {
+        SchedulerGeneration = 2 });
+    var v2Row = (await repository.SearchAsync("TCP")).Single(item => item.Id == enumerationId);
+    var v2Review = await repository.ReviewAsync(v2Row, Rating.Good, reviewedAt + 2, 20, null);
+    Require(v2Review.AlgorithmVersion == 2,
+        "local rollout switch can continue using frozen v0.2 parameters");
     var deletion = await repository.SoftDeleteAsync(new[] { enumerationId });
     Require((await repository.TrashAsync()).Any(item => item.Id == enumerationId) &&
         deletion.UndoUntil > deletion.DeletedAt, "soft deletion enters recoverable trash");
@@ -63,12 +74,15 @@ try
     {
         await audit.OpenAsync();
         var command = audit.CreateCommand();
+        command.CommandText = "SELECT COUNT(*) FROM review_event_v3";
+        Require(Convert.ToInt32(await command.ExecuteScalarAsync()) == 2,
+            "new answers append v3 events instead of mutating v1/v2 history");
         command.CommandText = "SELECT COUNT(*) FROM review_event_v2";
         Require(Convert.ToInt32(await command.ExecuteScalarAsync()) == 1,
-            "new answers append v2 events instead of mutating v1 history");
+            "rollout rollback appends a v2 event without rewriting v3 history");
         command.CommandText = "PRAGMA user_version";
-        Require(Convert.ToInt32(await command.ExecuteScalarAsync()) == 2,
-            "repository initializes schema v2");
+        Require(Convert.ToInt32(await command.ExecuteScalarAsync()) == 3,
+            "repository initializes schema v3");
     }
 
     await using var backup = new MemoryStream();
@@ -113,7 +127,7 @@ try
 
     var summary = await repository.DashboardAsync(
         DateTimeOffset.UtcNow.ToUnixTimeSeconds(), new DateTimeOffset(DateTime.Today).ToUnixTimeSeconds());
-    Require(summary.NewItems >= 2, "dashboard reads restored queue state");
+    Require(summary.NewItems <= 1, "dashboard reads the reviewed restored queue state");
     Console.WriteLine("Windows repository integration tests passed");
 }
 finally

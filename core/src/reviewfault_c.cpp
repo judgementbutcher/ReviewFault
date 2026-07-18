@@ -2,6 +2,7 @@
 
 #include "reviewfault/scheduler.hpp"
 #include "reviewfault/scheduler_v2.hpp"
+#include "reviewfault/scheduler_v3.hpp"
 
 #include <algorithm>
 #include <cstring>
@@ -140,6 +141,25 @@ rf_math_review_event_v2 to_c_math_event(
           event.due_at_before,
           event.due_at_after,
           event.scheduled_days};
+}
+
+rf_memory_review_event_v3 to_c_memory_event_v3(
+    const reviewfault::MemoryReviewEventV3& event) {
+  return {sizeof(rf_memory_review_event_v3), event.algorithm_version,
+          event.parameter_version, event.decision_flags,
+          event.personalized ? 1 : 0, event.learning_step ? 1 : 0,
+          event.due_at_after, event.target_retention, event.elapsed_days,
+          event.scheduled_days, event.retrievability_before, event.overdue_days};
+}
+
+rf_math_review_event_v3 to_c_math_event_v3(
+    const reviewfault::MathReviewEventV3& event) {
+  return {sizeof(rf_math_review_event_v3), event.algorithm_version,
+          event.parameter_version, event.decision_flags,
+          static_cast<int32_t>(event.requested_feedback),
+          static_cast<int32_t>(event.applied_feedback), event.due_at_after,
+          event.scheduled_days, event.duration_seconds,
+          static_cast<int32_t>(event.duration_quality), event.consecutive_failures};
 }
 
 template <typename Callable>
@@ -326,6 +346,65 @@ int32_t review_math_v2(const rf_math_schedule_state_v2* state,
                        char* error_buffer,
                        size_t error_buffer_size) {
   return rf_review_math_v2(state, input, result, error_buffer, error_buffer_size);
+}
+
+size_t rf_memory_review_result_v3_size(void) {
+  return sizeof(rf_memory_review_result_v3);
+}
+
+size_t rf_math_review_result_v3_size(void) {
+  return sizeof(rf_math_review_result_v3);
+}
+
+int32_t review_memory_v3(const rf_memory_schedule_state_v2* state,
+                         const rf_memory_review_input_v3* input,
+                         rf_memory_review_result_v3* result,
+                         char* error_buffer,
+                         size_t error_buffer_size) {
+  return invoke_v2([&] {
+    if (state == nullptr || input == nullptr || result == nullptr) {
+      throw std::invalid_argument("state, input, and result are required");
+    }
+    if (state->struct_size != sizeof(*state) || input->struct_size != sizeof(*input) ||
+        result->struct_size != sizeof(*result)) {
+      throw std::invalid_argument("ABI v3 structure size mismatch");
+    }
+    const auto reviewed = reviewfault::review_memory_v3(
+        to_cpp_memory_state(*state),
+        {static_cast<reviewfault::Rating>(input->rating), input->reviewed_at,
+         static_cast<reviewfault::MemoryPreset>(input->preset),
+         input->history_event_count, input->calibration_improvement,
+         input->consecutive_lapses});
+    result->state = to_c_memory_state(reviewed.state);
+    result->event = to_c_memory_event_v3(reviewed.event);
+  }, error_buffer, error_buffer_size);
+}
+
+int32_t review_math_v3(const rf_math_schedule_state_v2* state,
+                       const rf_math_attempt_input_v3* input,
+                       rf_math_review_result_v3* result,
+                       char* error_buffer,
+                       size_t error_buffer_size) {
+  return invoke_v2([&] {
+    if (state == nullptr || input == nullptr || result == nullptr) {
+      throw std::invalid_argument("state, input, and result are required");
+    }
+    if (state->struct_size != sizeof(*state) || input->struct_size != sizeof(*input) ||
+        result->struct_size != sizeof(*result)) {
+      throw std::invalid_argument("ABI v3 structure size mismatch");
+    }
+    const auto reviewed = reviewfault::review_math_v3(
+        to_cpp_math_state(*state),
+        {static_cast<reviewfault::MathFeedback>(input->feedback),
+         static_cast<reviewfault::MathErrorReason>(input->error_reason),
+         input->hint_revealed != 0, input->reviewed_at,
+         static_cast<reviewfault::MathIntensity>(input->intensity),
+         input->duration_seconds,
+         static_cast<reviewfault::DurationQualityV3>(input->duration_quality),
+         input->consecutive_failures});
+    result->state = to_c_math_state(reviewed.state);
+    result->event = to_c_math_event_v3(reviewed.event);
+  }, error_buffer, error_buffer_size);
 }
 
 }  // extern "C"

@@ -51,6 +51,10 @@ int main() {
                                          const rf_math_attempt_input_v2*,
                                          rf_math_review_result_v2*, char*, size_t)>(
       library, "review_math_v2");
+  const auto memory_v3 = load<int32_t (*)(const rf_memory_schedule_state_v2*,
+                                           const rf_memory_review_input_v3*,
+                                           rf_memory_review_result_v3*, char*, size_t)>(
+      library, "review_memory_v3");
 
   if (abi_version() != RF_SCHEDULER_ABI_VERSION ||
       config_size() != sizeof(rf_scheduler_config) || card_size() != sizeof(rf_card) ||
@@ -97,6 +101,25 @@ int main() {
   if (math_v2(&math_state, &math_input, &math_result, error, sizeof(error)) != 0 ||
       math_result.state.mastery_level != 1) {
     std::cerr << "dynamic math v2 ABI review failed: " << error << '\n';
+    dlclose(library);
+    return EXIT_FAILURE;
+  }
+
+  rf_memory_review_input_v3 memory_input_v3{sizeof(memory_input_v3),
+                                             RF_RATING_GOOD,
+                                             RF_MEMORY_BALANCED,
+                                             1'800'000'000,
+                                             200,
+                                             0.02,
+                                             0};
+  rf_memory_review_result_v3 memory_result_v3{};
+  memory_result_v3.struct_size = sizeof(memory_result_v3);
+  memory_state = load<rf_memory_schedule_state_v2 (*)()>(
+      library, "rf_new_memory_state_v2")();
+  if (memory_v3(&memory_state, &memory_input_v3, &memory_result_v3, error,
+                sizeof(error)) != 0 ||
+      memory_result_v3.event.algorithm_version != 3) {
+    std::cerr << "dynamic memory v3 ABI review failed: " << error << '\n';
     dlclose(library);
     return EXIT_FAILURE;
   }

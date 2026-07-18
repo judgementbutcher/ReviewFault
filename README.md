@@ -2,7 +2,7 @@
 
 ReviewFault 是面向考研数学与 408 的本地优先间隔学习软件。它不是把两类内容都压成普通闪卡：数学侧强调低摩擦记录、重做与错因复盘；408 侧强调主动回忆、分层提示与知识点关联。
 
-当前版本为 **0.2.3**（schema v2、调度 ABI v2、备份协议 v2），包含共享核心和两个原生客户端：
+当前版本为 **0.3.0**（schema v3、调度 ABI v3、备份协议 v3），包含共享核心和两个原生客户端：
 
 - Android：Kotlin + Jetpack Compose
 - Windows：C# + WinUI 3
@@ -29,13 +29,15 @@ Android 调试 APK 在完成 Android 构建后位于 `apps/android/app/build/out
 - [构建与验证](docs/building.md)
 - [需求验证矩阵](docs/verification.md)
 - [视觉与无障碍 token](docs/design-tokens.md)
-- [v0.3 后端与间隔学习升级计划](docs/roadmap-v0.3.md)
+- [v0.2 调度回放基线](docs/baseline-v0.2.md)
+- [v0.3.0 发布说明](docs/release-v0.3.0.md)
 
 `fixtures/scheduler_v1.tsv` 保留用于历史重放；`fixtures/memory_scheduler_v2.tsv` 与
-`fixtures/math_scheduler_v2.tsv` 是两套跨端黄金样例。JNI 和 P/Invoke 绑定只有在
+`fixtures/math_scheduler_v2.tsv` 保留冻结的 v2 黄金样例；`fixtures/*_scheduler_v3.tsv`
+固定 v3 决策结果。JNI 和 P/Invoke 绑定只有在
 相同输入产生相同状态与 UTC 到期秒时才算接入完成。
 
-## v0.2 已实现
+## v0.3 已实现
 
 - 今日—题库—添加—设置的信息结构、每天 20 个新 408 默认上限；
 - 408 FSRS-6 与数学 Mastery Ladder 两套独立调度路径；
@@ -44,7 +46,11 @@ Android 调试 APK 在完成 Android 构建后位于 `apps/android/app/build/out
 - 数学图片或文本录入、错因/错误步骤/关键提示、搜索和重做历史；
 - 408 问答、填空、分层提示、枚举与对比卡；
 - 完全离线的 SQLite 数据、不可变复习日志；
-- Android、Windows `.reviewfault` v2 完整备份与 v1/v2 恢复；
+- Android、Windows `.reviewfault` v3 完整备份与 v1/v2/v3 恢复；
 - Android JNI、Windows P/Invoke 共用同一调度核心。
+- 匿名本地回放评估、参数注册表与逐事件决策快照；
+- schema/备份/C ABI v3，同时继续恢复 v1/v2 备份并保留 v1/v2 回放入口；
+- 408 小样本保护、逾期与连续遗忘保护，数学错因分流、连续失败优先和长期熟练延长；
+- 可逆的“使用 v0.3 调度/继续 v0.2 参数”开关，切换不改写历史事件。
 
-仍不纳入 v0.2：永久清除、图示遮挡编辑器、OCR、云同步、个人参数训练与跨设备自动同步。发布前仍必须完成两套平台 SDK 构建和真机互恢复验收。
+仍不纳入 v0.3：永久清除、图示遮挡编辑器、OCR、云同步和跨设备自动同步。个人参数只在本地历史达到 200 条且回放校准误差至少改善 0.01 时启用；数据不足时继续使用冻结默认参数。

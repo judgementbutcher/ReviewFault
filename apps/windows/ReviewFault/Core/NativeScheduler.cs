@@ -127,6 +127,51 @@ internal struct MathResultV2Native
     public uint StructSize; public MathStateV2Native State; public MathEventV2Native Event;
 }
 
+[StructLayout(LayoutKind.Sequential)]
+internal struct MemoryInputV3Native
+{
+    public uint StructSize; public int Rating, Preset; public long ReviewedAt;
+    public uint HistoryEventCount; public double CalibrationImprovement;
+    public uint ConsecutiveLapses;
+}
+
+[StructLayout(LayoutKind.Sequential)]
+internal struct MemoryEventV3Native
+{
+    public uint StructSize, AlgorithmVersion, ParameterVersion, DecisionFlags;
+    public int Personalized, LearningStep; public long DueAtAfter;
+    public double TargetRetention, ElapsedDays, ScheduledDays, RetrievabilityBefore, OverdueDays;
+}
+
+[StructLayout(LayoutKind.Sequential)]
+internal struct MemoryResultV3Native
+{
+    public uint StructSize; public MemoryStateV2Native State; public MemoryEventV3Native Event;
+}
+
+[StructLayout(LayoutKind.Sequential)]
+internal struct MathInputV3Native
+{
+    public uint StructSize; public int Feedback, ErrorReason, HintRevealed, Intensity;
+    public long ReviewedAt; public uint DurationSeconds; public int DurationQuality;
+    public uint ConsecutiveFailures;
+}
+
+[StructLayout(LayoutKind.Sequential)]
+internal struct MathEventV3Native
+{
+    public uint StructSize, AlgorithmVersion, ParameterVersion, DecisionFlags;
+    public int RequestedFeedback, AppliedFeedback; public long DueAtAfter;
+    public double ScheduledDays; public uint DurationSeconds; public int DurationQuality;
+    public uint ConsecutiveFailures;
+}
+
+[StructLayout(LayoutKind.Sequential)]
+internal struct MathResultV3Native
+{
+    public uint StructSize; public MathStateV2Native State; public MathEventV3Native Event;
+}
+
 public sealed record ScheduleCard(
     CardState State,
     double Difficulty,
@@ -140,16 +185,24 @@ public sealed record ScheduleResult(
     ScheduleCard Card,
     double ElapsedDays,
     double ScheduledDays,
-    double RetrievabilityBefore);
+    double RetrievabilityBefore,
+    uint AlgorithmVersion = 2,
+    uint ParameterVersion = 1,
+    uint DecisionFlags = 0,
+    double TargetRetention = 0.90,
+    bool Personalized = false,
+    bool LearningStep = false,
+    double OverdueDays = 0);
 
 public sealed record MathScheduleResult(
     uint MasteryLevel, uint FluentStreak, long DueAt, long LastReviewedAt,
-    uint Repetitions, double ScheduledDays, int AppliedFeedback);
+    uint Repetitions, double ScheduledDays, int AppliedFeedback,
+    uint AlgorithmVersion = 2, uint ParameterVersion = 1, uint DecisionFlags = 0);
 
 public static class NativeScheduler
 {
     private const string Library = "reviewfault_core";
-    private const uint ExpectedAbiVersion = 2;
+    private const uint ExpectedAbiVersion = 3;
 
     [DllImport(Library, CallingConvention = CallingConvention.Cdecl)]
     private static extern uint rf_scheduler_abi_version();
@@ -177,6 +230,10 @@ public static class NativeScheduler
     private static extern nuint rf_math_schedule_state_v2_size();
     [DllImport(Library, CallingConvention = CallingConvention.Cdecl)]
     private static extern nuint rf_math_review_result_v2_size();
+    [DllImport(Library, CallingConvention = CallingConvention.Cdecl)]
+    private static extern nuint rf_memory_review_result_v3_size();
+    [DllImport(Library, CallingConvention = CallingConvention.Cdecl)]
+    private static extern nuint rf_math_review_result_v3_size();
     [DllImport(Library, CallingConvention = CallingConvention.Cdecl, CharSet = CharSet.Ansi)]
     private static extern int review_memory_v2(in MemoryStateV2Native state,
         in MemoryInputV2Native input, ref MemoryResultV2Native result,
@@ -184,6 +241,14 @@ public static class NativeScheduler
     [DllImport(Library, CallingConvention = CallingConvention.Cdecl, CharSet = CharSet.Ansi)]
     private static extern int review_math_v2(in MathStateV2Native state,
         in MathInputV2Native input, ref MathResultV2Native result,
+        StringBuilder errorBuffer, nuint errorBufferSize);
+    [DllImport(Library, CallingConvention = CallingConvention.Cdecl, CharSet = CharSet.Ansi)]
+    private static extern int review_memory_v3(in MemoryStateV2Native state,
+        in MemoryInputV3Native input, ref MemoryResultV3Native result,
+        StringBuilder errorBuffer, nuint errorBufferSize);
+    [DllImport(Library, CallingConvention = CallingConvention.Cdecl, CharSet = CharSet.Ansi)]
+    private static extern int review_math_v3(in MathStateV2Native state,
+        in MathInputV3Native input, ref MathResultV3Native result,
         StringBuilder errorBuffer, nuint errorBufferSize);
 
     [DllImport(Library, CallingConvention = CallingConvention.Cdecl, CharSet = CharSet.Ansi)]
@@ -210,6 +275,9 @@ public static class NativeScheduler
             rf_math_schedule_state_v2_size() != (nuint)Marshal.SizeOf<MathStateV2Native>() ||
             rf_math_review_result_v2_size() != (nuint)Marshal.SizeOf<MathResultV2Native>())
             throw new InvalidOperationException("调度器 ABI v2 结构不匹配，请重新安装应用。");
+        if (rf_memory_review_result_v3_size() != (nuint)Marshal.SizeOf<MemoryResultV3Native>() ||
+            rf_math_review_result_v3_size() != (nuint)Marshal.SizeOf<MathResultV3Native>())
+            throw new InvalidOperationException("调度器 ABI v3 结构不匹配，请重新安装应用。");
     }
 
     public static ScheduleCard NewCard()
@@ -304,6 +372,59 @@ public static class NativeScheduler
         return new MathScheduleResult(result.State.MasteryLevel, result.State.FluentStreak,
             result.State.DueAt, result.State.LastReviewedAt, result.State.Repetitions,
             result.Event.ScheduledDays, result.Event.AppliedFeedback);
+    }
+
+    public static ScheduleResult ReviewMemoryV3(
+        ScheduleCard card, Rating rating, long reviewedAt, int preset,
+        uint historyEventCount, double calibrationImprovement, uint consecutiveLapses)
+    {
+        ValidateAbi();
+        var state = new MemoryStateV2Native {
+            StructSize = (uint)Marshal.SizeOf<MemoryStateV2Native>(), State = (int)card.State,
+            Difficulty = card.Difficulty, StabilityDays = card.StabilityDays,
+            DueAt = card.DueAt, LastReviewedAt = card.LastReviewedAt,
+            Repetitions = card.Repetitions, Lapses = card.Lapses };
+        var input = new MemoryInputV3Native {
+            StructSize = (uint)Marshal.SizeOf<MemoryInputV3Native>(), Rating = (int)rating,
+            Preset = preset, ReviewedAt = reviewedAt, HistoryEventCount = historyEventCount,
+            CalibrationImprovement = calibrationImprovement, ConsecutiveLapses = consecutiveLapses };
+        var result = new MemoryResultV3Native { StructSize = (uint)Marshal.SizeOf<MemoryResultV3Native>() };
+        var error = new StringBuilder(256);
+        var status = review_memory_v3(in state, in input, ref result, error, (nuint)error.Capacity);
+        if (status != 0) throw new ArgumentException(error.ToString());
+        return new ScheduleResult(new ScheduleCard((CardState)result.State.State,
+            result.State.Difficulty, result.State.StabilityDays, result.State.DueAt,
+            result.State.LastReviewedAt, result.State.Repetitions, result.State.Lapses),
+            result.Event.ElapsedDays, result.Event.ScheduledDays,
+            result.Event.RetrievabilityBefore, result.Event.AlgorithmVersion,
+            result.Event.ParameterVersion, result.Event.DecisionFlags,
+            result.Event.TargetRetention, result.Event.Personalized != 0,
+            result.Event.LearningStep != 0, result.Event.OverdueDays);
+    }
+
+    public static MathScheduleResult ReviewMathV3(
+        uint masteryLevel, uint fluentStreak, long dueAt, long lastReviewedAt,
+        uint repetitions, int feedback, int errorReason, bool hintRevealed,
+        long reviewedAt, int intensity, uint durationSeconds, int durationQuality,
+        uint consecutiveFailures)
+    {
+        ValidateAbi();
+        var state = new MathStateV2Native { StructSize = (uint)Marshal.SizeOf<MathStateV2Native>(),
+            MasteryLevel = masteryLevel, FluentStreak = fluentStreak, DueAt = dueAt,
+            LastReviewedAt = lastReviewedAt, Repetitions = repetitions };
+        var input = new MathInputV3Native { StructSize = (uint)Marshal.SizeOf<MathInputV3Native>(),
+            Feedback = feedback, ErrorReason = errorReason, HintRevealed = hintRevealed ? 1 : 0,
+            Intensity = intensity, ReviewedAt = reviewedAt, DurationSeconds = durationSeconds,
+            DurationQuality = durationQuality, ConsecutiveFailures = consecutiveFailures };
+        var result = new MathResultV3Native { StructSize = (uint)Marshal.SizeOf<MathResultV3Native>() };
+        var error = new StringBuilder(256);
+        var status = review_math_v3(in state, in input, ref result, error, (nuint)error.Capacity);
+        if (status != 0) throw new ArgumentException(error.ToString());
+        return new MathScheduleResult(result.State.MasteryLevel, result.State.FluentStreak,
+            result.State.DueAt, result.State.LastReviewedAt, result.State.Repetitions,
+            result.Event.ScheduledDays, result.Event.AppliedFeedback,
+            result.Event.AlgorithmVersion, result.Event.ParameterVersion,
+            result.Event.DecisionFlags);
     }
 
     private static ScheduleCard ToManaged(CardNative card) => new(

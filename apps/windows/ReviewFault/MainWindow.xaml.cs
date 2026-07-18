@@ -131,6 +131,10 @@ public sealed class MainWindow : Window
             SelectedIndex = current.MemoryPreset switch { "time_saving" => 0, "reinforced" => 2, _ => 1 } };
         var math = new ComboBox { Header = "数学复习强度", ItemsSource = new[] { "密集", "均衡", "舒缓" },
             SelectedIndex = current.MathIntensity switch { "intensive" => 0, "relaxed" => 2, _ => 1 } };
+        var schedulerGeneration = new ToggleSwitch {
+            Header = "使用 v0.3 调度（关闭后继续使用 v0.2 参数）",
+            IsOn = current.SchedulerGeneration == 3,
+        };
         var appearance = new ComboBox { Header = "外观（仅本设备）",
             ItemsSource = new[] { "跟随系统", "浅色", "深色" },
             SelectedIndex = (local["appearance.theme"] as string) switch { "light" => 1, "dark" => 2, _ => 0 } };
@@ -150,6 +154,7 @@ public sealed class MainWindow : Window
         panel.Children.Add(Heading("设置", 32));
         panel.Children.Add(Heading("学习与算法", 20));
         panel.Children.Add(newLimit); panel.Children.Add(minutes); panel.Children.Add(memory); panel.Children.Add(math);
+        panel.Children.Add(schedulerGeneration);
         panel.Children.Add(appearance); panel.Children.Add(reminder); panel.Children.Add(reminderTime);
         panel.Children.Add(Body("提醒星期")); panel.Children.Add(weekdayRow);
         panel.Children.Add(ActionButton("保存学习设置", async () =>
@@ -157,7 +162,8 @@ public sealed class MainWindow : Window
             await viewModel.Repository.SaveLearningPreferencesAsync(new LearningPreferences(
                 (int)newLimit.Value, (int)minutes.Value,
                 memory.SelectedIndex switch { 0 => "time_saving", 2 => "reinforced", _ => "balanced" },
-                math.SelectedIndex switch { 0 => "intensive", 2 => "relaxed", _ => "balanced" }, true, true));
+                math.SelectedIndex switch { 0 => "intensive", 2 => "relaxed", _ => "balanced" },
+                true, true, schedulerGeneration.IsOn ? 3 : 2));
             var themeValue = appearance.SelectedIndex switch { 1 => "light", 2 => "dark", _ => "system" };
             local["appearance.theme"] = themeValue;
             local["reminder.enabled"] = reminder.IsOn;

@@ -18,7 +18,7 @@
 extern "C" {
 #endif
 
-#define RF_SCHEDULER_ABI_VERSION 2u
+#define RF_SCHEDULER_ABI_VERSION 3u
 
 typedef enum rf_rating {
   RF_RATING_AGAIN = 1,
@@ -240,6 +240,91 @@ RF_API int32_t review_memory_v2(const rf_memory_schedule_state_v2* state,
 RF_API int32_t review_math_v2(const rf_math_schedule_state_v2* state,
                               const rf_math_attempt_input_v2* input,
                               rf_math_review_result_v2* result,
+                              char* error_buffer,
+                              size_t error_buffer_size);
+
+/* ABI v3 adds explicit rollout inputs and decision metadata. ABI v1/v2 entry
+ * points remain exported for deterministic history replay. */
+typedef enum rf_duration_quality_v3 {
+  RF_DURATION_UNKNOWN = 0,
+  RF_DURATION_RELIABLE = 1,
+  RF_DURATION_TOO_SHORT = 2,
+  RF_DURATION_INTERRUPTED = 3
+} rf_duration_quality_v3;
+
+typedef struct rf_memory_review_input_v3 {
+  uint32_t struct_size;
+  int32_t rating;
+  int32_t preset;
+  int64_t reviewed_at;
+  uint32_t history_event_count;
+  double calibration_improvement;
+  uint32_t consecutive_lapses;
+} rf_memory_review_input_v3;
+
+typedef struct rf_memory_review_event_v3 {
+  uint32_t struct_size;
+  uint32_t algorithm_version;
+  uint32_t parameter_version;
+  uint32_t decision_flags;
+  int32_t personalized;
+  int32_t learning_step;
+  int64_t due_at_after;
+  double target_retention;
+  double elapsed_days;
+  double scheduled_days;
+  double retrievability_before;
+  double overdue_days;
+} rf_memory_review_event_v3;
+
+typedef struct rf_memory_review_result_v3 {
+  uint32_t struct_size;
+  rf_memory_schedule_state_v2 state;
+  rf_memory_review_event_v3 event;
+} rf_memory_review_result_v3;
+
+typedef struct rf_math_attempt_input_v3 {
+  uint32_t struct_size;
+  int32_t feedback;
+  int32_t error_reason;
+  int32_t hint_revealed;
+  int32_t intensity;
+  int64_t reviewed_at;
+  uint32_t duration_seconds;
+  int32_t duration_quality;
+  uint32_t consecutive_failures;
+} rf_math_attempt_input_v3;
+
+typedef struct rf_math_review_event_v3 {
+  uint32_t struct_size;
+  uint32_t algorithm_version;
+  uint32_t parameter_version;
+  uint32_t decision_flags;
+  int32_t requested_feedback;
+  int32_t applied_feedback;
+  int64_t due_at_after;
+  double scheduled_days;
+  uint32_t duration_seconds;
+  int32_t duration_quality;
+  uint32_t consecutive_failures;
+} rf_math_review_event_v3;
+
+typedef struct rf_math_review_result_v3 {
+  uint32_t struct_size;
+  rf_math_schedule_state_v2 state;
+  rf_math_review_event_v3 event;
+} rf_math_review_result_v3;
+
+RF_API size_t rf_memory_review_result_v3_size(void);
+RF_API size_t rf_math_review_result_v3_size(void);
+RF_API int32_t review_memory_v3(const rf_memory_schedule_state_v2* state,
+                                const rf_memory_review_input_v3* input,
+                                rf_memory_review_result_v3* result,
+                                char* error_buffer,
+                                size_t error_buffer_size);
+RF_API int32_t review_math_v3(const rf_math_schedule_state_v2* state,
+                              const rf_math_attempt_input_v3* input,
+                              rf_math_review_result_v3* result,
                               char* error_buffer,
                               size_t error_buffer_size);
 

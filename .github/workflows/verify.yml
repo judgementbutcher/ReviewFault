@@ -1,7 +1,7 @@
 name: verify
 
 env:
-  APP_VERSION: 0.2.3
+  APP_VERSION: 0.3.0
 
 on:
   push:

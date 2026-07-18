@@ -26,6 +26,7 @@ for (const platform of platforms) {
     'learning_preferences', 'review_event_v2', 'memory_schedule_state',
     'math_schedule_state', 'deleted_at', 'include_memory_cards',
     'include_math_problems', 'daily_new_memory_limit',
+    'review_event_v3', 'algorithm_parameter_registry', 'scheduler_generation',
   ]) {
     assert(repository.includes(token), `${platform.name} repository is missing ${token}`);
   }
@@ -35,7 +36,7 @@ for (const platform of platforms) {
   for (const token of ['abi', 'review']) {
     assert(binding.toLowerCase().includes(token), `${platform.name} binding is missing ${token}`);
   }
-  for (const token of ['memory', 'math', 'v2']) {
+  for (const token of ['memory', 'math', 'v2', 'v3']) {
     assert(binding.toLowerCase().includes(token), `${platform.name} v2 binding is missing ${token}`);
   }
 }

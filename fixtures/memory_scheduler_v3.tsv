@@ -1,0 +1,3 @@
+rating	reviewed_at	preset	history_count	calibration_improvement	consecutive_lapses	expected_state	expected_due_at	expected_algorithm_version	expected_parameter_version	expected_flags
+3	1800000000	1	0	0	0	2	1800199282	3	2	0
+1	1800000000	1	0	0	4	1	1800028800	3	2	5

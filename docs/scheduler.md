@@ -1,6 +1,9 @@
-# ReviewFault 调度 ABI v2
+# ReviewFault 调度 ABI v3
 
-v0.2 对 408 与数学使用两套独立、纯函数、UTC 秒精确的调度器。每个事件保存算法版本、
+v3 新增 `review_memory_v3` 与 `review_math_v3`，并保留全部 v1/v2 符号用于历史回放。
+每次 v3 决策记录算法版本、独立参数版本和决策标志；408 与数学参数不共用版本号。
+
+ReviewFault 对 408 与数学使用两套独立、纯函数、UTC 秒精确的调度器。每个事件保存算法版本、
 冻结参数版本和当次预设；修改预设只影响之后的作答，不重写已有到期时间。ABI v1 的
 `rf_review` 仅为旧历史回放保留。
 
@@ -17,7 +20,7 @@ v0.2 对 408 与数学使用两套独立、纯函数、UTC 秒精确的调度器
 事件记录评分、预设、D/S/R 前后值、到期前后值、ABI 版本 2 和参数版本 1。公开算法
 说明见 [FSRS The Algorithm](https://github.com/open-spaced-repetition/awesome-fsrs/wiki/The-Algorithm)。
 
-## 数学：Mastery Ladder v2
+## 数学：Mastery Ladder v3
 
 熟练度 `0–6` 的基础间隔为 `1/3/7/14/30/60/120` 天，再乘密集/均衡/舒缓的
 `0.75/1.0/1.25`，最后限制在 1–180 天。
@@ -37,6 +40,7 @@ v0.2 对 408 与数学使用两套独立、纯函数、UTC 秒精确的调度器
 
 ## 跨端约定
 
-所有结构均带 `struct_size`。新作答调用 `review_memory_v2` 或 `review_math_v2`；同一
+所有结构均带 `struct_size`。默认新作答调用 `review_memory_v3` 或 `review_math_v3`，灰度关闭时
+调用对应 v2 入口；同一
 输入必须逐字段得到相同结果。黄金样例位于 `fixtures/*_scheduler_v2.tsv`。时间点使用
 有符号 64 位 UTC Unix 秒，客户端不得按本地午夜改写调度结果。

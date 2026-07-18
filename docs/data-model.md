@@ -1,6 +1,6 @@
-# 跨端数据契约 v2
+# 跨端数据契约 v3
 
-schema v2 通过 `002_v0_2.sql` 从 v1 顺序升级，`001_initial.sql` 保持不变。升级保留
+schema v3 通过 `003_v0_3.sql` 从 v2 顺序升级，旧迁移保持不变。升级保留
 所有旧 `due_at`；有历史的项目标记 `needs_history_replay=1`，第一次 v2 作答时由仓储
 回放 v1 `review_log`/`attempt` 后写回类型化状态。
 
@@ -13,7 +13,9 @@ schema v2 通过 `002_v0_2.sql` 从 v1 顺序升级，`001_initial.sql` 保持�
 - `memory_review_event_v2` / `math_review_event_v2`：类型专属证据；数学详情关联 `attempt`。
 
 三张 v2 事件表和旧 `review_log` 都由触发器禁止更新、删除。旧字段继续只读保留供
-审计与历史迁移，两端新作答只写 v2 事件。
+审计与历史迁移。启用 v0.3 调度时，新作答写不可变的 `review_event_v3` 与类型明细；公共事件
+记录参数校验和、时区偏移、耗时质量和 JSON 决策快照。`algorithm_parameter_registry` 固定算法名、
+算法版本、参数版本、校验和及生效时间。切回 v0.2 参数时继续写 v2 事件，不改写任何历史。
 
 ## 设置、题库与删除
 
