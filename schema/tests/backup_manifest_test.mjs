@@ -37,7 +37,6 @@ assert(!appVersionPattern.test('0.1.0'));
 const implementations = [
   '../../apps/android/app/src/main/java/cn/reviewfault/app/data/AppDatabase.kt',
   '../../apps/windows/ReviewFault/Data/AppRepository.cs',
-  '../../apps/harmony/entry/src/main/ets/data/AppRepository.ets',
 ];
 for (const relative of implementations) {
   const source = readFileSync(new URL(relative, import.meta.url), 'utf8');

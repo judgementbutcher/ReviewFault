@@ -6,7 +6,7 @@
 make test
 ```
 
-该命令执行：调度算法与黄金样例、领域规则、真实共享库动态加载、SQLite schema、备份协议和三端源码契约测试。也可使用 CMake：
+该命令执行：调度算法与黄金样例、领域规则、真实共享库动态加载、SQLite schema、备份协议和两端源码契约测试。也可使用 CMake：
 
 ```sh
 cmake -S . -B build -DREVIEWFAULT_BUILD_TESTS=ON
@@ -31,20 +31,6 @@ cd apps/android
 JKS/PKCS12 文件的 base64 内容，最后一个值是证书 SHA-256 指纹（小写且不含冒号）；
 私钥本身不得提交到仓库。配置完成后，`v0.2.2` tag 会构建并校验
 `assembleRelease`，生成可覆盖升级的正式 APK。
-
-## HarmonyOS
-
-用 DevEco Studio 打开 `apps/harmony`，选择 HarmonyOS SDK API 13 或更高版本，并为 `default` product 配置签名。运行 entry 模块。CMake 在构建期把根目录的 schema 注入 NAPI 模块；不要手工复制 SQL。
-
-正式发布由带有 `self-hosted`、`linux`、`harmonyos` 标签的组织 runner 构建；该 runner 需要安装
-HarmonyOS SDK API 13 或更高版本，并把 `ohpm`、`hvigorw` 加入 `PATH`。release workflow
-需要仓库 secrets：`HARMONY_KEYSTORE_BASE64`、`HARMONY_KEYSTORE_PASSWORD`、
-`HARMONY_KEY_ALIAS`、`HARMONY_KEY_PASSWORD`、`HARMONY_CERTIFICATE_BASE64` 和
-`HARMONY_PROFILE_BASE64`。三个 `BASE64` 值分别是发布 `.p12`、`.cer` 和 `.p7b` 文件的
-base64 内容；签名材料只会写入 runner 临时目录。tag 发布和手动触发都会生成
-`ReviewFault-harmony-v0.2.2.hap`，手动触发可用于给既有 `v0.2.2` Release 补充 HAP。
-
-真机验收需覆盖 PhotoViewPicker、DocumentViewPicker、`RdbStore.backup/restore` 和跨端 `.reviewfault` 恢复。API 13 是最低版本，因为系统 zlib 从该版本起明确拒绝压缩包路径穿越。
 
 ## Windows
 
@@ -73,7 +59,7 @@ dotnet msbuild apps/windows/ReviewFault/ReviewFault.csproj -t:Compile \
 
 ## 跨端门禁
 
-- 三端运行 `fixtures/scheduler_v1.tsv` 后结果必须逐字段一致；
-- Android 导出的备份应能在 Windows 与鸿蒙恢复，反向组合也要覆盖；
+- 两端运行 `fixtures/scheduler_v1.tsv` 后结果必须逐字段一致；
+- Android 导出的备份应能在 Windows 恢复，Windows 导出的备份也应能在 Android 恢复；
 - 恢复损坏哈希、非法路径、错误 schema 版本时必须保留原数据；
 - 改动 schema、调度公式或 C ABI 时必须分别提升对应版本，不能静默复用版本 1。

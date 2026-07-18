@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict';
-import { readFileSync } from 'node:fs';
+import { readFileSync, readdirSync } from 'node:fs';
 
 const version = '0.2.2';
 const read = (relative) => readFileSync(new URL(relative, import.meta.url), 'utf8');
@@ -8,8 +8,6 @@ const contracts = [
   ['README', '../../README.md', `当前版本为 **${version}**`],
   ['CMake', '../../CMakeLists.txt', `VERSION ${version}`],
   ['Android', '../../apps/android/app/build.gradle.kts', `versionName = "${version}"`],
-  ['Harmony app', '../../apps/harmony/AppScope/app.json5', `"versionName": "${version}"`],
-  ['Harmony package', '../../apps/harmony/entry/oh-package.json5', `"version": "${version}"`],
   ['Windows project', '../../apps/windows/ReviewFault/ReviewFault.csproj', `<Version>${version}</Version>`],
   ['Windows manifest', '../../apps/windows/ReviewFault/app.manifest', `version="${version}.0"`],
   ['verify workflow', '../../.github/workflows/verify.yml', `APP_VERSION: ${version}`],
@@ -21,10 +19,7 @@ for (const [name, path, token] of contracts) {
   assert(read(path).includes(token), `${name} is not synchronized to ${version}`);
 }
 
-for (const repository of [
-  '../../apps/windows/ReviewFault/Data/AppRepository.cs',
-  '../../apps/harmony/entry/src/main/ets/data/AppRepository.ets',
-]) {
+for (const repository of ['../../apps/windows/ReviewFault/Data/AppRepository.cs']) {
   assert(read(repository).includes(version), `${repository} backup metadata is stale`);
 }
 
@@ -36,16 +31,10 @@ assert(release.includes('ANDROID_KEYSTORE_BASE64'),
 assert(release.includes('ANDROID_CERT_SHA256') && release.includes('apksigner') &&
   release.includes('--print-certs'),
   'release workflow must pin and verify the Android signing certificate');
-assert(release.includes('ReviewFault-harmony-v${{ env.APP_VERSION }}.hap') &&
-  release.includes('needs: [core, android, harmony, windows]'),
-  'release workflow must publish a HarmonyOS HAP and gate publishing on its build');
-assert(release.includes('HARMONY_KEYSTORE_BASE64') &&
-  release.includes('configure-harmony-signing.mjs') &&
-  release.includes("-name '*-signed.hap'"),
-  'release workflow must build a persistently signed HarmonyOS HAP');
-assert(release.includes('workflow_dispatch:') &&
-  release.includes('tag_name: v${{ env.APP_VERSION }}'),
-  'release workflow must support adding the HAP to the existing version release');
+assert.deepEqual(readdirSync(new URL('../../apps/', import.meta.url)).sort(),
+  ['android', 'windows'], 'only supported platform clients may be present');
+assert(release.includes('needs: [core, android, windows]'),
+  'release workflow must be gated on both supported platform builds');
 assert(release.includes('test "$GITHUB_REF_NAME" = "v$APP_VERSION"'),
   'release tag must match application metadata');
 

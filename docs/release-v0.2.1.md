@@ -17,6 +17,5 @@
 
 - Android debug APK：最低 API 26；
 - Windows x64 ZIP：解压后运行，Windows 10 1809 或更高；
-- HarmonyOS：版本元数据已同步，签名 HAP 仍需组织的 DevEco/HarmonyOS runner 生成。
 
 本版本不修改 schema v2、调度 ABI v2 或备份协议 v2。所有发布资产的 SHA-256 见 `SHA256SUMS`。

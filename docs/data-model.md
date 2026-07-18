@@ -13,7 +13,7 @@ schema v2 通过 `002_v0_2.sql` 从 v1 顺序升级，`001_initial.sql` 保持�
 - `memory_review_event_v2` / `math_review_event_v2`：类型专属证据；数学详情关联 `attempt`。
 
 三张 v2 事件表和旧 `review_log` 都由触发器禁止更新、删除。旧字段继续只读保留供
-审计与历史迁移，三端新作答只写 v2 事件。
+审计与历史迁移，两端新作答只写 v2 事件。
 
 ## 设置、题库与删除
 

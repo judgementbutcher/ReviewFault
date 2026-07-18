@@ -1,4 +1,0 @@
-#pragma once
-
-inline constexpr char kReviewFaultSchemaV1[] = R"RFSQL(@REVIEWFAULT_SCHEMA_V1_SQL@)RFSQL";
-inline constexpr char kReviewFaultSchemaV2[] = R"RFSQL(@REVIEWFAULT_SCHEMA_V2_SQL@)RFSQL";

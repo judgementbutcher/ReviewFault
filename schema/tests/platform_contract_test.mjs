@@ -9,12 +9,6 @@ const platforms = [
     binding: '../../apps/android/app/src/main/cpp/scheduler_jni.cpp',
   },
   {
-    name: 'HarmonyOS',
-    repository: '../../apps/harmony/entry/src/main/ets/data/AppRepository.ets',
-    ui: '../../apps/harmony/entry/src/main/ets/pages/Index.ets',
-    binding: '../../apps/harmony/entry/src/main/cpp/napi_scheduler.cpp',
-  },
-  {
     name: 'Windows',
     repository: '../../apps/windows/ReviewFault/Data/AppRepository.cs',
     ui: '../../apps/windows/ReviewFault/MainWindow.xaml.cs',
@@ -45,13 +39,5 @@ for (const platform of platforms) {
     assert(binding.toLowerCase().includes(token), `${platform.name} v2 binding is missing ${token}`);
   }
 }
-
-const harmonyRepository = readFileSync(new URL(
-  '../../apps/harmony/entry/src/main/ets/data/AppRepository.ets', import.meta.url,
-), 'utf8');
-assert(harmonyRepository.includes('.beginTransaction()'));
-assert(harmonyRepository.includes('.rollBack()'));
-assert(!/executeSql\(['"`]BEGIN/i.test(harmonyRepository),
-  'HarmonyOS executeSql must not be used for transaction control');
 
 console.log('Platform source contract tests passed');

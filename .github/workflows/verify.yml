@@ -69,7 +69,3 @@ jobs:
           dotnet-version: 8.0.x
       - uses: microsoft/setup-msbuild@v2
       - run: msbuild apps/windows/ReviewFault/ReviewFault.csproj -restore -p:Platform=x64
-
-# HarmonyOS SDK and signing are installed through DevEco Studio and are not
-# redistributable on GitHub-hosted runners. Run the entry module in the
-# organization's signed HarmonyOS runner before release.

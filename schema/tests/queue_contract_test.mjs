@@ -15,13 +15,6 @@ const sources = [
     },
   },
   {
-    name: 'HarmonyOS',
-    text: read('../../apps/harmony/entry/src/main/ets/data/AppRepository.ets'),
-    method(name) {
-      return this.text.match(new RegExp(`async ${name}\\([\\s\\S]*?querySql\\(\\x60([\\s\\S]*?)\\x60`))[1];
-    },
-  },
-  {
     name: 'Windows',
     text: read('../../apps/windows/ReviewFault/Data/AppRepository.cs'),
     method(name) {

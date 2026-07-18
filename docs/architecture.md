@@ -2,12 +2,12 @@
 
 ## 为什么保留原生 UI
 
-三端在输入能力上差异明显：鸿蒙和 Android 需要相机、相册、分享入口及移动端手势；Windows 需要剪贴板、拖放、窗口与键盘快捷键。界面和系统集成分别原生实现，避免最低公分母式体验。
+Android 和 Windows 在输入能力上差异明显：Android 需要相机、相册、分享入口及移动端手势；Windows 需要剪贴板、拖放、窗口与键盘快捷键。界面和系统集成分别原生实现，避免最低公分母式体验。
 
 调度算法必须跨端完全一致，因此放在小型 C++ 核心中。核心不负责 UI、数据库、联网或本地日期，只接收 UTC 秒和纯数据并返回结果。所有可变业务数据由客户端写入同一版本的数据契约。
 
 ```text
-ArkUI / Compose / WinUI
+Compose / WinUI
          │
 应用服务（今日队列、录题、作答会话、导入导出）
          │
@@ -19,7 +19,6 @@ reviewfault_core（C ABI：UTC 输入 → 调度结果）
 ## 模块边界
 
 - `core/`：调度、校验、版本化 C ABI；不得依赖平台 SDK。
-- `apps/harmony/`：ArkTS UI，使用 NAPI 封装核心。
 - `apps/android/`：Kotlin UI，使用 JNI 封装核心。
 - `apps/windows/`：C#/WinUI UI，使用 P/Invoke 封装核心 DLL。
 - `schema/`：只追加的 SQLite 迁移与版本化备份 manifest schema。
