@@ -4,7 +4,7 @@ using Windows.Storage;
 
 namespace ReviewFault.ViewModels;
 
-public enum AppDestination { Today, Library, Add, Settings, Trash, Review }
+public enum AppDestination { Today, Insights, Library, Add, Settings, Trash, Review }
 
 public sealed class AppViewModel
 {

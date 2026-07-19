@@ -10,7 +10,7 @@
 | 专注轮次与预报 | 到期积压抑制新内容、显式关闭保护、7 日桶边界、双端 SQL 一致性 | 跨午夜和系统时区切换真机验证 |
 | 会话跳过与结束 | 双端排除首项/全部候选、排除查询零事件写入、清空后重新可见、平台入口契约 | 两端连续跳过、提前结束与系统返回键真机验证 |
 | 题库/设置 | 领域分页与设置校验；平台仓储包含标签、软删除、恢复和设置 | 5,000 条数据性能与 UI 自动化 |
-| 原生 UI | Android 响应式 Compose、Windows NavigationView、Harmony Stage/ArkUI 源码契约 | 动态字体、读屏、暗色对比与响应式真机审计 |
+| 原生 UI | Android 响应式 Compose、Windows NavigationView、Harmony Stage/ArkUI 源码契约；三端洞察字段与现代暗黑 token | 动态字体、读屏、暗色对比、减少动态效果与响应式真机审计 |
 
 本轮宿主门禁包括 `make test`、Windows 仓储集成测试、Linux 上的 WinUI 托管编译、
 同步服务 Release 编译，以及 Android arm64-v8a/x86_64 debug 构建与 lint。

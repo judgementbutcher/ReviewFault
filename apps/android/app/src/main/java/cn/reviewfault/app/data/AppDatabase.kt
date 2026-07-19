@@ -22,6 +22,7 @@ import java.io.OutputStream
 import java.security.MessageDigest
 import java.security.SecureRandom
 import java.time.Instant
+import java.time.LocalDate
 import java.time.ZoneId
 import java.time.ZonedDateTime
 import java.util.UUID
@@ -58,6 +59,30 @@ data class DashboardSummary(
     val deferredDueMinutes: Int = 0,
     val tomorrowDue: Int = 0,
     val nextSevenDaysDue: Int = 0,
+)
+
+data class InsightDay(
+    val label: String,
+    val dueLabel: String,
+    val reviews: Int,
+    val due: Int,
+)
+
+data class SubjectInsight(
+    val subject: String,
+    val total: Int,
+    val mastered: Int,
+)
+
+data class InsightsSnapshot(
+    val reviewsToday: Int = 0,
+    val accuracyPercent: Int = 0,
+    val streakDays: Int = 0,
+    val totalReviews: Int = 0,
+    val activeItems: Int = 0,
+    val masteredItems: Int = 0,
+    val days: List<InsightDay> = emptyList(),
+    val subjects: List<SubjectInsight> = emptyList(),
 )
 
 data class LearningPreferences(
@@ -720,6 +745,129 @@ class AppDatabase private constructor(context: Context) :
                 cursor.intOrZero(9),
             )
         }
+    }
+
+    fun insights(now: Long, dayStart: Long): InsightsSnapshot {
+        val zone = ZoneId.systemDefault()
+        val today = Instant.ofEpochSecond(dayStart).atZone(zone).toLocalDate()
+        val historyStart = dayStart - 6 * 86_400L
+        val reviewByDay = mutableMapOf<Int, Int>()
+        readableDatabase.rawQuery(
+            """
+            WITH events AS (
+              SELECT reviewed_at FROM review_event_v2
+              UNION ALL SELECT reviewed_at FROM review_event_v3
+            )
+            SELECT CAST((reviewed_at - ?) / 86400 AS INTEGER), COUNT(*)
+            FROM events WHERE reviewed_at >= ? AND reviewed_at < ?
+            GROUP BY 1
+            """.trimIndent(),
+            arrayOf(historyStart.toString(), historyStart.toString(), (dayStart + 86_400).toString()),
+        ).use { cursor ->
+            while (cursor.moveToNext()) reviewByDay[cursor.getInt(0)] = cursor.getInt(1)
+        }
+        val dueByDay = mutableMapOf<Int, Int>()
+        readableDatabase.rawQuery(
+            """
+            SELECT CAST((due_at - ?) / 86400 AS INTEGER), COUNT(*)
+            FROM study_item
+            WHERE deleted_at IS NULL AND suspended_at IS NULL AND scheduler_state <> 0
+              AND due_at >= ? AND due_at < ?
+            GROUP BY 1
+            """.trimIndent(),
+            arrayOf(dayStart.toString(), dayStart.toString(), (dayStart + 7 * 86_400).toString()),
+        ).use { cursor ->
+            while (cursor.moveToNext()) dueByDay[cursor.getInt(0)] = cursor.getInt(1)
+        }
+        val days = (0..6).map { index ->
+            InsightDay(
+                label = today.minusDays((6 - index).toLong()).dayOfWeek
+                    .getDisplayName(java.time.format.TextStyle.NARROW, java.util.Locale.SIMPLIFIED_CHINESE),
+                dueLabel = today.plusDays(index.toLong()).dayOfWeek
+                    .getDisplayName(java.time.format.TextStyle.NARROW, java.util.Locale.SIMPLIFIED_CHINESE),
+                reviews = reviewByDay[index] ?: 0,
+                due = dueByDay[index] ?: 0,
+            )
+        }
+        var totalReviews = 0
+        var recentReviews = 0
+        var recentSuccessful = 0
+        readableDatabase.rawQuery(
+            """
+            WITH events AS (
+              SELECT algorithm, feedback, reviewed_at FROM review_event_v2
+              UNION ALL SELECT algorithm, feedback, reviewed_at FROM review_event_v3
+            )
+            SELECT COUNT(*),
+              COALESCE(SUM(CASE WHEN reviewed_at >= ? THEN 1 ELSE 0 END), 0),
+              COALESCE(SUM(CASE WHEN reviewed_at >= ? AND (
+                (algorithm = 'memory_fsrs_6' AND feedback >= 3) OR
+                (algorithm = 'math_mastery_ladder' AND feedback >= 2)
+              ) THEN 1 ELSE 0 END), 0)
+            FROM events
+            """.trimIndent(),
+            arrayOf(historyStart.toString(), historyStart.toString()),
+        ).use { cursor ->
+            if (cursor.moveToFirst()) {
+                totalReviews = cursor.getInt(0)
+                recentReviews = cursor.getInt(1)
+                recentSuccessful = cursor.getInt(2)
+            }
+        }
+        val reviewedDates = mutableSetOf<LocalDate>()
+        readableDatabase.rawQuery(
+            """
+            SELECT reviewed_at FROM review_event_v2 WHERE reviewed_at >= ?
+            UNION ALL SELECT reviewed_at FROM review_event_v3 WHERE reviewed_at >= ?
+            """.trimIndent(),
+            arrayOf((dayStart - 366 * 86_400L).toString(), (dayStart - 366 * 86_400L).toString()),
+        ).use { cursor ->
+            while (cursor.moveToNext()) reviewedDates +=
+                Instant.ofEpochSecond(cursor.getLong(0)).atZone(zone).toLocalDate()
+        }
+        var streakDays = 0
+        var streakDate = today
+        if (streakDate !in reviewedDates) streakDate = streakDate.minusDays(1)
+        while (streakDate in reviewedDates) {
+            streakDays++
+            streakDate = streakDate.minusDays(1)
+        }
+        var activeItems = 0
+        var masteredItems = 0
+        readableDatabase.rawQuery(
+            """
+            SELECT COUNT(*), COALESCE(SUM(CASE WHEN repetitions >= 3 AND stability_days >= 14 THEN 1 ELSE 0 END), 0)
+            FROM study_item WHERE deleted_at IS NULL AND suspended_at IS NULL
+            """.trimIndent(), null,
+        ).use { cursor ->
+            if (cursor.moveToFirst()) {
+                activeItems = cursor.getInt(0)
+                masteredItems = cursor.getInt(1)
+            }
+        }
+        val subjects = mutableListOf<SubjectInsight>()
+        readableDatabase.rawQuery(
+            """
+            SELECT subject, COUNT(*),
+              COALESCE(SUM(CASE WHEN repetitions >= 3 AND stability_days >= 14 THEN 1 ELSE 0 END), 0)
+            FROM study_item WHERE deleted_at IS NULL AND suspended_at IS NULL
+            GROUP BY subject ORDER BY COUNT(*) DESC
+            """.trimIndent(), null,
+        ).use { cursor ->
+            while (cursor.moveToNext()) subjects += SubjectInsight(
+                cursor.getString(0), cursor.getInt(1), cursor.getInt(2),
+            )
+        }
+        return InsightsSnapshot(
+            reviewsToday = reviewByDay[6] ?: 0,
+            accuracyPercent = if (recentReviews == 0) 0 else (recentSuccessful * 100 / recentReviews),
+            streakDays = streakDays,
+            totalReviews = totalReviews,
+            activeItems = activeItems,
+            masteredItems = masteredItems,
+            days = days,
+            subjects = subjects,
+        )
     }
 
     fun nextForReview(

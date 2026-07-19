@@ -282,6 +282,14 @@ try
     Require(summary.NewItems <= 1, "dashboard reads the reviewed restored queue state");
     Require(summary.NextSevenDaysDue >= summary.TomorrowDue,
         "seven-day forecast includes the next local calendar day");
+    var insights = await repository.InsightsAsync(
+        DateTimeOffset.UtcNow.ToUnixTimeSeconds(), new DateTimeOffset(DateTime.Today).ToUnixTimeSeconds());
+    Require(insights.Days.Count == 7 && insights.TotalReviews >= 3,
+        "insights expose seven-day activity and lifetime review totals");
+    Require(insights.ActiveItems == 4 && insights.Subjects.Sum(subject => subject.Total) == 4,
+        "insights subject distribution covers every active item");
+    Require(insights.AccuracyPercent is >= 0 and <= 100,
+        "insights accuracy remains a bounded percentage");
     Console.WriteLine("Windows repository integration tests passed");
 }
 finally

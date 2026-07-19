@@ -1,6 +1,7 @@
 using Microsoft.UI.Xaml;
 using Microsoft.UI.Xaml.Controls;
 using Microsoft.UI.Xaml.Media;
+using Microsoft.UI.Xaml.Media.Animation;
 using Microsoft.UI.Xaml.Media.Imaging;
 using ReviewFault.Core;
 using ReviewFault.Data;
@@ -21,7 +22,8 @@ public sealed class MainWindow : Window
     private readonly AppViewModel viewModel = new();
     private readonly Grid Root = new()
     {
-        Background = new SolidColorBrush(DesignTokens.LightBackground),
+        Background = DesignTokens.BackgroundBrush,
+        RequestedTheme = ElementTheme.Dark,
     };
     private readonly NavigationView Navigation = new()
     {
@@ -42,6 +44,7 @@ public sealed class MainWindow : Window
     {
         Navigation.Content = Root;
         Navigation.MenuItems.Add(new NavigationViewItem { Content = "今日", Tag = "today", Icon = new SymbolIcon(Symbol.Home) });
+        Navigation.MenuItems.Add(new NavigationViewItem { Content = "洞察", Tag = "insights", Icon = new FontIcon { Glyph = "\uE9D2" } });
         Navigation.MenuItems.Add(new NavigationViewItem { Content = "题库", Tag = "library", Icon = new SymbolIcon(Symbol.Library) });
         Navigation.MenuItems.Add(new NavigationViewItem { Content = "添加", Tag = "add", Icon = new SymbolIcon(Symbol.Add) });
         Navigation.MenuItems.Add(new NavigationViewItem { Content = "设置", Tag = "settings", Icon = new SymbolIcon(Symbol.Setting) });
@@ -52,6 +55,7 @@ public sealed class MainWindow : Window
             switch (destination)
             {
                 case "today": viewModel.Navigate(AppDestination.Today); await ShowHomeAsync(); break;
+                case "insights": viewModel.Navigate(AppDestination.Insights); await ShowInsightsAsync(); break;
                 case "library": viewModel.Navigate(AppDestination.Library); await ShowLibraryAsync(""); break;
                 case "add": viewModel.Navigate(AppDestination.Add); ShowAdd(); break;
                 case "settings": viewModel.Navigate(AppDestination.Settings); await ShowSettingsAsync(); break;
@@ -75,9 +79,7 @@ public sealed class MainWindow : Window
         {
             await viewModel.InitializeAsync();
             reminderService = new ReminderService(viewModel.Repository, DispatcherQueue);
-            var storedTheme = ApplicationData.Current.LocalSettings.Values["appearance.theme"] as string ?? "system";
-            Root.RequestedTheme = storedTheme switch {
-                "light" => ElementTheme.Light, "dark" => ElementTheme.Dark, _ => ElementTheme.Default };
+            Root.RequestedTheme = ElementTheme.Dark;
             await ShowHomeAsync();
         }
         catch (Exception error)
@@ -123,6 +125,55 @@ public sealed class MainWindow : Window
         SetPage(panel);
     }
 
+    private async Task ShowInsightsAsync()
+    {
+        var now = DateTimeOffset.UtcNow.ToUnixTimeSeconds();
+        var dayStart = new DateTimeOffset(DateTime.Today).ToUnixTimeSeconds();
+        var insights = await viewModel.Repository.InsightsAsync(now, dayStart);
+        var panel = PagePanel();
+        panel.Children.Add(Body("学习洞察 · LEARNING SIGNALS"));
+        panel.Children.Add(Heading("看见你的积累", 32));
+        panel.Children.Add(Body("趋势用来调整节奏，不用单次结果评价自己。"));
+        var metrics = new StackPanel { Orientation = Orientation.Horizontal, Spacing = 12 };
+        metrics.Children.Add(MetricCard("今日复习", insights.ReviewsToday.ToString(), "次"));
+        metrics.Children.Add(MetricCard("近 7 日正确", insights.AccuracyPercent.ToString(), "%"));
+        metrics.Children.Add(MetricCard("连续学习", insights.StreakDays.ToString(), "天"));
+        panel.Children.Add(metrics);
+        panel.Children.Add(ChartCard("复习活跃度", "过去 7 天完成的复习次数",
+            insights.Days.Select(day => (day.Label, day.Reviews)).ToArray(), DesignTokens.Brand));
+        panel.Children.Add(ChartCard("未来负载", "今天起 7 天的到期内容",
+            insights.Days.Select(day => (day.DueLabel, day.Due)).ToArray(), DesignTokens.Purple));
+        var progress = new ProgressBar
+        {
+            Minimum = 0, Maximum = Math.Max(1, insights.ActiveItems), Value = insights.MasteredItems,
+            Height = 8, HorizontalAlignment = HorizontalAlignment.Stretch,
+        };
+        panel.Children.Add(Card(
+            Heading("知识库进度", 20),
+            Body($"{insights.MasteredItems} / {insights.ActiveItems} 条熟练内容 · 累计 {insights.TotalReviews} 次复习"),
+            Body("稳定度达到 14 天且至少复习 3 次，记为熟练。"), progress));
+        var subjectPanel = new StackPanel { Spacing = 12 };
+        subjectPanel.Children.Add(Heading("学科分布", 20));
+        subjectPanel.Children.Add(Body("各学科内容量与熟练占比"));
+        if (insights.Subjects.Count == 0) subjectPanel.Children.Add(Body("添加内容后，这里会出现学科分布。"));
+        foreach (var subject in insights.Subjects)
+        {
+            subjectPanel.Children.Add(Body($"{SubjectLabel(subject.Subject)}  ·  {subject.Mastered}/{subject.Total}"));
+            subjectPanel.Children.Add(new ProgressBar
+            {
+                Minimum = 0, Maximum = Math.Max(1, subject.Total), Value = subject.Mastered,
+                Height = 6, HorizontalAlignment = HorizontalAlignment.Stretch,
+            });
+        }
+        panel.Children.Add(new Border
+        {
+            Child = subjectPanel, Background = DesignTokens.GlassBrush,
+            BorderBrush = new SolidColorBrush(DesignTokens.GlassBorder), BorderThickness = new Thickness(1),
+            Padding = DesignTokens.CardPadding, CornerRadius = DesignTokens.CardRadius,
+        });
+        SetPage(panel);
+    }
+
     private void ShowAdd()
     {
         var panel = PagePanel();
@@ -150,8 +201,7 @@ public sealed class MainWindow : Window
             IsOn = current.SchedulerGeneration == 3,
         };
         var appearance = new ComboBox { Header = "外观（仅本设备）",
-            ItemsSource = new[] { "跟随系统", "浅色", "深色" },
-            SelectedIndex = (local["appearance.theme"] as string) switch { "light" => 1, "dark" => 2, _ => 0 } };
+            ItemsSource = new[] { "现代暗黑" }, SelectedIndex = 0 };
         var reminder = new ToggleSwitch { Header = "本地提醒（仅有待复习内容时发送）",
             IsOn = local["reminder.enabled"] is true };
         var reminderTime = new TimePicker { Header = "提醒时间", ClockIdentifier = "24HourClock" };
@@ -178,7 +228,7 @@ public sealed class MainWindow : Window
                 memory.SelectedIndex switch { 0 => "time_saving", 2 => "reinforced", _ => "balanced" },
                 math.SelectedIndex switch { 0 => "intensive", 2 => "relaxed", _ => "balanced" },
                 true, true, schedulerGeneration.IsOn ? 3 : 2));
-            var themeValue = appearance.SelectedIndex switch { 1 => "light", 2 => "dark", _ => "system" };
+            const string themeValue = "dark";
             local["appearance.theme"] = themeValue;
             local["reminder.enabled"] = reminder.IsOn;
             local["reminder.time"] = TimeOnly.FromTimeSpan(reminderTime.Time).ToString("HH:mm");
@@ -186,8 +236,7 @@ public sealed class MainWindow : Window
             for (var index = 0; index < weekdayChecks.Length; index++)
                 if (weekdayChecks[index].IsChecked == true) selectedMask |= 1 << index;
             local["reminder.weekdays"] = selectedMask;
-            Root.RequestedTheme = themeValue switch {
-                "light" => ElementTheme.Light, "dark" => ElementTheme.Dark, _ => ElementTheme.Default };
+            Root.RequestedTheme = ElementTheme.Dark;
             await (reminderService?.CheckAsync() ?? Task.CompletedTask);
             await MessageAsync("设置已保存；只影响此后的作答。");
         }));
@@ -657,6 +706,7 @@ public sealed class MainWindow : Window
         Margin = new Thickness(34),
         MaxWidth = 900,
         HorizontalAlignment = HorizontalAlignment.Stretch,
+        Transitions = new TransitionCollection { new EntranceThemeTransition { IsStaggeringEnabled = true } },
     };
 
     private static TextBlock Heading(string value, double size) => new()
@@ -664,7 +714,7 @@ public sealed class MainWindow : Window
         Text = value,
         FontSize = size,
         FontWeight = Microsoft.UI.Text.FontWeights.SemiBold,
-            Foreground = new SolidColorBrush(DesignTokens.LightHeading),
+        Foreground = new SolidColorBrush(DesignTokens.DarkHeading),
         TextWrapping = TextWrapping.Wrap,
     };
 
@@ -682,10 +732,68 @@ public sealed class MainWindow : Window
         return new Border
         {
             Child = content,
-            Background = new SolidColorBrush(Windows.UI.Color.FromArgb(255, 255, 255, 255)),
+            Background = DesignTokens.GlassBrush,
+            BorderBrush = new SolidColorBrush(DesignTokens.GlassBorder),
+            BorderThickness = new Thickness(1),
             Padding = DesignTokens.CardPadding,
             CornerRadius = DesignTokens.CardRadius,
         };
+    }
+
+    private static Border MetricCard(string label, string value, string unit)
+    {
+        var number = new StackPanel { Orientation = Orientation.Horizontal, Spacing = 4 };
+        number.Children.Add(new TextBlock
+        {
+            Text = value, FontSize = 30, FontWeight = Microsoft.UI.Text.FontWeights.SemiBold,
+            Foreground = new SolidColorBrush(DesignTokens.Brand),
+        });
+        number.Children.Add(new TextBlock { Text = unit, VerticalAlignment = VerticalAlignment.Bottom, Margin = new Thickness(0, 0, 0, 5) });
+        var content = new StackPanel { Spacing = 4 };
+        content.Children.Add(number); content.Children.Add(Body(label));
+        return new Border
+        {
+            Child = content, Width = 190, Padding = new Thickness(18), CornerRadius = DesignTokens.CardRadius,
+            Background = DesignTokens.GlassBrush, BorderBrush = new SolidColorBrush(DesignTokens.GlassBorder),
+            BorderThickness = new Thickness(1),
+        };
+    }
+
+    private static Border ChartCard(
+        string title, string subtitle, IReadOnlyList<(string Label, int Value)> values,
+        Windows.UI.Color color)
+    {
+        var chart = new Grid { Height = 160, ColumnSpacing = 10 };
+        for (var index = 0; index < values.Count; index++)
+            chart.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(1, GridUnitType.Star) });
+        var maximum = Math.Max(1, values.Count == 0 ? 0 : values.Max(item => item.Value));
+        for (var index = 0; index < values.Count; index++)
+        {
+            var item = values[index];
+            var column = new StackPanel
+            {
+                Spacing = 5, VerticalAlignment = VerticalAlignment.Bottom,
+                HorizontalAlignment = HorizontalAlignment.Stretch,
+            };
+            column.Children.Add(new TextBlock { Text = item.Value.ToString(), HorizontalAlignment = HorizontalAlignment.Center, FontSize = 12 });
+            column.Children.Add(new Border
+            {
+                Height = 12 + 92d * item.Value / maximum,
+                Background = new LinearGradientBrush
+                {
+                    StartPoint = new Windows.Foundation.Point(0, 0), EndPoint = new Windows.Foundation.Point(0, 1),
+                    GradientStops =
+                    {
+                        new GradientStop { Color = color, Offset = 0 },
+                        new GradientStop { Color = Windows.UI.Color.FromArgb(75, color.R, color.G, color.B), Offset = 1 },
+                    },
+                },
+                CornerRadius = new CornerRadius(8, 8, 3, 3),
+            });
+            column.Children.Add(new TextBlock { Text = item.Label, HorizontalAlignment = HorizontalAlignment.Center, FontSize = 12, Opacity = .72 });
+            Grid.SetColumn(column, index); chart.Children.Add(column);
+        }
+        return Card(Heading(title, 20), Body(subtitle), chart);
     }
 
     private static Button ActionButton(string label, Func<Task> action)

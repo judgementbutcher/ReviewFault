@@ -11,6 +11,7 @@ import cn.reviewfault.app.data.AppDatabase
 import cn.reviewfault.app.data.DashboardSummary
 import cn.reviewfault.app.data.DeletionState
 import cn.reviewfault.app.data.LearningPreferences
+import cn.reviewfault.app.data.InsightsSnapshot
 import cn.reviewfault.app.data.LibraryFilter
 import cn.reviewfault.app.data.StudyRow
 import cn.reviewfault.app.sync.AccountTokens
@@ -33,12 +34,13 @@ import kotlinx.coroutines.flow.distinctUntilChanged
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
 
-enum class AppDestination { Today, Library, Add, Settings, Review }
+enum class AppDestination { Today, Insights, Library, Add, Settings, Review }
 
 data class AppUiState(
     val destination: AppDestination = AppDestination.Today,
     val loading: Boolean = true,
     val summary: DashboardSummary = DashboardSummary(0, 0, 0, 0),
+    val insights: InsightsSnapshot = InsightsSnapshot(),
     val library: List<StudyRow> = emptyList(),
     val trash: List<StudyRow> = emptyList(),
     val selectedIds: Set<String> = emptySet(),
@@ -79,7 +81,7 @@ class AppViewModel(application: Application, private val savedState: SavedStateH
         answerRevealed = savedState["answerRevealed"] ?: false,
         startedAt = savedState["startedAt"] ?: 0L,
         selectedIds = (savedState.get<ArrayList<String>>("selectedIds") ?: arrayListOf()).toSet(),
-        themeMode = devicePreferences.getInt("theme", 0),
+        themeMode = devicePreferences.getInt("theme", 2),
         reminderEnabled = devicePreferences.getBoolean("reminder_enabled", false),
         reminderTime = devicePreferences.getString("reminder_time", "20:00") ?: "20:00",
         syncEndpoint = syncPreferences.getString("endpoint", "https://sync.reviewfault.app")
@@ -140,6 +142,7 @@ class AppViewModel(application: Application, private val savedState: SavedStateH
         ) }
         when (destination) {
             AppDestination.Today -> refreshToday()
+            AppDestination.Insights -> refreshInsights()
             AppDestination.Library -> loadLibrary()
             AppDestination.Settings -> { loadSettings(); loadTrash() }
             else -> Unit
@@ -161,6 +164,13 @@ class AppViewModel(application: Application, private val savedState: SavedStateH
 
     fun refreshToday() = io {
         refreshTodayNow()
+    }
+
+    fun refreshInsights() = io {
+        val now = Instant.now().epochSecond
+        val dayStart = ZonedDateTime.ofInstant(Instant.ofEpochSecond(now), ZoneId.systemDefault())
+            .toLocalDate().atStartOfDay(ZoneId.systemDefault()).toEpochSecond()
+        mutableState.update { it.copy(insights = database.insights(now, dayStart), loading = false) }
     }
 
     private fun refreshTodayNow() {

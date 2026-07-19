@@ -45,4 +45,22 @@ for (const platform of platforms) {
   }
 }
 
+for (const [name, repositoryPath, uiPath] of [
+  ['Android', '../../apps/android/app/src/main/java/cn/reviewfault/app/data/AppDatabase.kt',
+    '../../apps/android/app/src/main/java/cn/reviewfault/app/MainActivity.kt'],
+  ['Windows', '../../apps/windows/ReviewFault/Data/AppRepository.cs',
+    '../../apps/windows/ReviewFault/MainWindow.xaml.cs'],
+  ['HarmonyOS', '../../apps/harmony/entry/src/main/ets/data/LocalDatabase.ets',
+    '../../apps/harmony/entry/src/main/ets/pages/Index.ets'],
+]) {
+  const repository = readFileSync(new URL(repositoryPath, import.meta.url), 'utf8');
+  const ui = readFileSync(new URL(uiPath, import.meta.url), 'utf8');
+  for (const token of ['reviewstoday', 'accuracypercent', 'streakdays', 'mastereditems'])
+    assert(repository.toLowerCase().includes(token), `${name} insights repository is missing ${token}`);
+  for (const token of ['洞察', '复习活跃度', '未来负载', '知识库进度'])
+    assert(ui.includes(token), `${name} insights UI is missing ${token}`);
+  assert(ui.includes('07110F') || ui.includes('BackgroundBrush'),
+    `${name} UI is missing the modern dark foundation`);
+}
+
 console.log('Platform source contract tests passed');

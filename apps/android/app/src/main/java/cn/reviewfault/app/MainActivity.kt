@@ -14,6 +14,7 @@ import androidx.activity.enableEdgeToEdge
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.animation.AnimatedContent
 import androidx.compose.animation.AnimatedVisibility
+import androidx.compose.animation.core.animateFloatAsState
 import androidx.compose.animation.animateContentSize
 import androidx.compose.animation.fadeIn
 import androidx.compose.animation.fadeOut
@@ -49,6 +50,7 @@ import androidx.compose.material.icons.automirrored.filled.ArrowForward
 import androidx.compose.material.icons.automirrored.filled.LibraryBooks
 import androidx.compose.material.icons.filled.Add
 import androidx.compose.material.icons.filled.AddCircle
+import androidx.compose.material.icons.filled.Analytics
 import androidx.compose.material.icons.filled.Backup
 import androidx.compose.material.icons.filled.CheckCircle
 import androidx.compose.material.icons.filled.CloudSync
@@ -104,7 +106,10 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.draw.drawBehind
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.Brush
+import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.layout.ContentScale
@@ -162,22 +167,23 @@ private val LightScheme = lightColorScheme(
     error = Color(0xFFB3261E),
 )
 private val DarkScheme = darkColorScheme(
-    primary = Sage,
-    onPrimary = Color(0xFF073824),
-    primaryContainer = Color(0xFF214C39),
-    onPrimaryContainer = Color(0xFFD5F1E1),
-    secondary = Color(0xFFCFC3EC),
-    onSecondary = Color(0xFF342D47),
-    secondaryContainer = Color(0xFF4C455F),
-    onSecondaryContainer = Color(0xFFEAE3F9),
-    background = Color(0xFF0E1712),
-    onBackground = Color(0xFFDCE9E1),
-    surface = Color(0xFF18221C),
-    onSurface = Color(0xFFE3ECE6),
-    surfaceVariant = Color(0xFF29332D),
-    onSurfaceVariant = Color(0xFFBAC5BE),
-    outline = Color(0xFF849089),
-    outlineVariant = Color(0xFF36423B),
+    primary = Color(0xFF78E8C1),
+    onPrimary = Color(0xFF00382A),
+    primaryContainer = Color(0xFF155943),
+    onPrimaryContainer = Color(0xFFB7F4DB),
+    secondary = Color(0xFFC9B8FF),
+    onSecondary = Color(0xFF33255E),
+    secondaryContainer = Color(0xFF4B3D76),
+    onSecondaryContainer = Color(0xFFE9DDFF),
+    tertiary = Color(0xFFFFC66C),
+    background = Color(0xFF07110F),
+    onBackground = Color(0xFFE1EEE9),
+    surface = Color(0xFF101C19),
+    onSurface = Color(0xFFE5F0EC),
+    surfaceVariant = Color(0xFF1C2B27),
+    onSurfaceVariant = Color(0xFFB7C9C3),
+    outline = Color(0xFF78918A),
+    outlineVariant = Color(0xFF2A4039),
     error = Color(0xFFFFB4AB),
 )
 private val AppTypography = Typography(
@@ -195,7 +201,22 @@ private val AppTypography = Typography(
 private fun ReviewFaultTheme(themeMode: Int, content: @Composable () -> Unit) {
     val dark = themeMode == 2 || (themeMode == 0 && isSystemInDarkTheme())
     MaterialTheme(colorScheme = if (dark) DarkScheme else LightScheme, typography = AppTypography) {
-        Surface(modifier = Modifier.fillMaxSize(), color = MaterialTheme.colorScheme.background, content = content)
+        Surface(color = Color.Transparent, contentColor = MaterialTheme.colorScheme.onBackground) {
+            Box(
+                modifier = Modifier.fillMaxSize()
+                    .background(
+                        if (dark) Brush.verticalGradient(listOf(Color(0xFF07110F), Color(0xFF0B171B), Color(0xFF101322)))
+                        else Brush.verticalGradient(listOf(Color(0xFFF7F5EF), Color(0xFFF1F5F2))),
+                    )
+                    .drawBehind {
+                        if (dark) {
+                            drawCircle(Color(0x243BE6B0), size.minDimension * .48f, Offset(size.width * .88f, size.height * .08f))
+                            drawCircle(Color(0x1F9A73FF), size.minDimension * .42f, Offset(size.width * .08f, size.height * .72f))
+                        }
+                    },
+                content = { content() },
+            )
+        }
     }
 }
 
@@ -214,7 +235,7 @@ private fun ReviewFaultApp(state: AppUiState, model: AppViewModel) {
         }
     }
     Scaffold(
-        containerColor = MaterialTheme.colorScheme.background,
+        containerColor = Color.Transparent,
         snackbarHost = { SnackbarHost(snackbar) },
         bottomBar = {
             AnimatedVisibility(
@@ -237,6 +258,7 @@ private fun ReviewFaultApp(state: AppUiState, model: AppViewModel) {
             ) { destination ->
                 when (destination) {
                     AppDestination.Today -> TodayScreen(state, model)
+                    AppDestination.Insights -> InsightsScreen(state)
                     AppDestination.Library -> LibraryScreen(state, model)
                     AppDestination.Add -> AddScreen(model)
                     AppDestination.Settings -> SettingsScreen(state, model)
@@ -253,6 +275,7 @@ private fun AppNavigationRail(selected: AppDestination, navigate: (AppDestinatio
     NavigationRail(containerColor = MaterialTheme.colorScheme.surface) {
         listOf(
             Triple(AppDestination.Today, "今日", Icons.Default.Home),
+            Triple(AppDestination.Insights, "洞察", Icons.Default.Analytics),
             Triple(AppDestination.Library, "题库", Icons.AutoMirrored.Filled.LibraryBooks),
             Triple(AppDestination.Add, "添加", Icons.Default.AddCircle),
             Triple(AppDestination.Settings, "设置", Icons.Default.Settings),
@@ -271,6 +294,7 @@ private fun AppNavigationRail(selected: AppDestination, navigate: (AppDestinatio
 private fun AppNavigation(selected: AppDestination, navigate: (AppDestination) -> Unit) {
     val destinations = listOf(
         Triple(AppDestination.Today, "今日", Icons.Default.Home),
+        Triple(AppDestination.Insights, "洞察", Icons.Default.Analytics),
         Triple(AppDestination.Library, "题库", Icons.AutoMirrored.Filled.LibraryBooks),
         Triple(AppDestination.Add, "添加", Icons.Default.AddCircle),
         Triple(AppDestination.Settings, "设置", Icons.Default.Settings),
@@ -398,6 +422,132 @@ private fun TodayScreen(state: AppUiState, model: AppViewModel) = Page {
             }
             IconButton(onClick = { model.navigate(AppDestination.Settings) }) {
                 Icon(Icons.AutoMirrored.Filled.ArrowForward, contentDescription = "调整学习节奏")
+            }
+        }
+    }
+}
+
+@Composable
+private fun InsightsScreen(state: AppUiState) = Page {
+    val insights = state.insights
+    PageHeader("学习洞察", "看见你的积累", "用趋势理解节奏，不用单次结果评价自己。")
+    Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(10.dp)) {
+        InsightMetric("今日复习", insights.reviewsToday.toString(), "次", Modifier.weight(1f))
+        InsightMetric("近 7 日正确", "${insights.accuracyPercent}", "%", Modifier.weight(1f))
+        InsightMetric("连续学习", insights.streakDays.toString(), "天", Modifier.weight(1f))
+    }
+    GlassPanel("复习活跃度", "过去 7 天完成的复习次数") {
+        MiniBarChart(
+            values = insights.days.map { it.reviews },
+            labels = insights.days.map { it.label },
+            color = MaterialTheme.colorScheme.primary,
+        )
+    }
+    GlassPanel("未来负载", "今天起 7 天的到期内容") {
+        MiniBarChart(
+            values = insights.days.map { it.due },
+            labels = insights.days.map { it.dueLabel },
+            color = MaterialTheme.colorScheme.secondary,
+        )
+    }
+    GlassPanel("知识库进度", "稳定度达到 14 天且至少复习 3 次，记为熟练") {
+        val progress = if (insights.activeItems == 0) 0f
+            else insights.masteredItems.toFloat() / insights.activeItems
+        Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.Bottom) {
+            Column(Modifier.weight(1f)) {
+                Text("${insights.masteredItems} / ${insights.activeItems}", style = MaterialTheme.typography.headlineMedium)
+                Text("熟练内容", color = MaterialTheme.colorScheme.onSurfaceVariant)
+            }
+            Text("累计 ${insights.totalReviews} 次复习", color = MaterialTheme.colorScheme.primary)
+        }
+        LinearProgressIndicator(
+            progress = { progress },
+            modifier = Modifier.fillMaxWidth().height(9.dp).clip(RoundedCornerShape(9.dp)),
+            color = MaterialTheme.colorScheme.primary,
+            trackColor = MaterialTheme.colorScheme.surfaceVariant,
+        )
+    }
+    GlassPanel("学科分布", "各学科内容量与熟练占比") {
+        if (insights.subjects.isEmpty()) {
+            Text("添加内容后，这里会出现学科分布。", color = MaterialTheme.colorScheme.onSurfaceVariant)
+        } else insights.subjects.forEach { subject ->
+            val progress = if (subject.total == 0) 0f else subject.mastered.toFloat() / subject.total
+            Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
+                Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
+                    Text(subjectLabel(subject.subject), style = MaterialTheme.typography.titleSmall)
+                    Text("${subject.mastered}/${subject.total}", color = MaterialTheme.colorScheme.onSurfaceVariant)
+                }
+                LinearProgressIndicator(
+                    progress = { progress },
+                    modifier = Modifier.fillMaxWidth().height(6.dp).clip(RoundedCornerShape(6.dp)),
+                    color = if (subject.subject == "math") MaterialTheme.colorScheme.secondary else MaterialTheme.colorScheme.primary,
+                    trackColor = MaterialTheme.colorScheme.surfaceVariant,
+                )
+            }
+        }
+    }
+}
+
+@Composable
+private fun InsightMetric(label: String, value: String, unit: String, modifier: Modifier = Modifier) {
+    Surface(
+        modifier = modifier,
+        shape = RoundedCornerShape(22.dp),
+        color = MaterialTheme.colorScheme.surface.copy(alpha = .72f),
+        border = BorderStroke(1.dp, MaterialTheme.colorScheme.outlineVariant.copy(alpha = .72f)),
+    ) {
+        Column(Modifier.padding(horizontal = 14.dp, vertical = 17.dp)) {
+            Row(verticalAlignment = Alignment.Bottom) {
+                Text(value, style = MaterialTheme.typography.headlineMedium, color = MaterialTheme.colorScheme.primary)
+                Text(unit, modifier = Modifier.padding(start = 3.dp, bottom = 3.dp), color = MaterialTheme.colorScheme.onSurfaceVariant)
+            }
+            Text(label, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+        }
+    }
+}
+
+@Composable
+private fun GlassPanel(title: String, subtitle: String, content: @Composable ColumnScope.() -> Unit) {
+    Surface(
+        modifier = Modifier.fillMaxWidth(),
+        shape = RoundedCornerShape(26.dp),
+        color = MaterialTheme.colorScheme.surface.copy(alpha = .76f),
+        border = BorderStroke(1.dp, MaterialTheme.colorScheme.outlineVariant.copy(alpha = .68f)),
+    ) {
+        Column(Modifier.padding(20.dp), verticalArrangement = Arrangement.spacedBy(16.dp)) {
+            Column(verticalArrangement = Arrangement.spacedBy(3.dp)) {
+                Text(title, style = MaterialTheme.typography.titleLarge)
+                Text(subtitle, style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
+            }
+            content()
+        }
+    }
+}
+
+@Composable
+private fun MiniBarChart(values: List<Int>, labels: List<String>, color: Color) {
+    val maximum = (values.maxOrNull() ?: 0).coerceAtLeast(1)
+    Row(
+        modifier = Modifier.fillMaxWidth().height(142.dp),
+        horizontalArrangement = Arrangement.spacedBy(8.dp),
+        verticalAlignment = Alignment.Bottom,
+    ) {
+        values.forEachIndexed { index, value ->
+            val fraction by animateFloatAsState(value.toFloat() / maximum, label = "图表柱")
+            Column(
+                modifier = Modifier.weight(1f),
+                horizontalAlignment = Alignment.CenterHorizontally,
+                verticalArrangement = Arrangement.Bottom,
+            ) {
+                Text(value.toString(), style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                Spacer(Modifier.height(5.dp))
+                Box(
+                    Modifier.fillMaxWidth().height((10 + 86 * fraction).dp)
+                        .clip(RoundedCornerShape(topStart = 9.dp, topEnd = 9.dp, bottomStart = 4.dp, bottomEnd = 4.dp))
+                        .background(Brush.verticalGradient(listOf(color, color.copy(alpha = .28f)))),
+                )
+                Spacer(Modifier.height(7.dp))
+                Text(labels.getOrElse(index) { "" }, style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
             }
         }
     }

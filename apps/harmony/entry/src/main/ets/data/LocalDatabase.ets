@@ -8,6 +8,12 @@ const SCHEMA_VERSION = 4;
 
 export interface DashboardSummary {
   overdue: number; dueToday: number; newItems: number;
+  reviewsToday: number; accuracyPercent: number; streakDays: number; totalReviews: number;
+  activeItems: number; masteredItems: number; reviewDays: number[]; dueDays: number[];
+  subjects: SubjectInsight[];
+}
+export interface SubjectInsight {
+  subject: string; total: number; mastered: number;
 }
 export interface StudyItem {
   id: string; kind: string; subject: string; state: number; difficulty: number;
@@ -65,10 +71,73 @@ export class LocalDatabase {
       COALESCE(SUM(CASE WHEN i.scheduler_state = 0 THEN 1 ELSE 0 END), 0)
       FROM study_item i WHERE i.deleted_at IS NULL`,
       [dayStart, dayStart, now]);
-    try {
-      if (!result.goToFirstRow()) return { overdue: 0, dueToday: 0, newItems: 0 };
-      return { overdue: result.getLong(0), dueToday: result.getLong(1), newItems: result.getLong(2) };
-    } finally { result.close(); }
+    let overdue = 0; let dueToday = 0; let newItems = 0;
+    try { if (result.goToFirstRow()) {
+      overdue = result.getLong(0); dueToday = result.getLong(1); newItems = result.getLong(2);
+    } } finally { result.close(); }
+    const historyStart = dayStart - 6 * 86400;
+    const reviewDays: number[] = [0, 0, 0, 0, 0, 0, 0];
+    const reviewResult = await store.querySql(`WITH events AS (
+      SELECT reviewed_at FROM review_event_v2 UNION ALL SELECT reviewed_at FROM review_event_v3)
+      SELECT CAST((reviewed_at - ?) / 86400 AS INTEGER), COUNT(*) FROM events
+      WHERE reviewed_at >= ? AND reviewed_at < ? GROUP BY 1`,
+      [historyStart, historyStart, dayStart + 86400]);
+    try { if (reviewResult.goToFirstRow()) do {
+      const index = reviewResult.getLong(0); if (index >= 0 && index < 7) reviewDays[index] = reviewResult.getLong(1);
+    } while (reviewResult.goToNextRow()); } finally { reviewResult.close(); }
+    const dueDays: number[] = [0, 0, 0, 0, 0, 0, 0];
+    const dueResult = await store.querySql(`SELECT CAST((due_at - ?) / 86400 AS INTEGER), COUNT(*)
+      FROM study_item WHERE deleted_at IS NULL AND suspended_at IS NULL AND scheduler_state <> 0
+      AND due_at >= ? AND due_at < ? GROUP BY 1`, [dayStart, dayStart, dayStart + 7 * 86400]);
+    try { if (dueResult.goToFirstRow()) do {
+      const index = dueResult.getLong(0); if (index >= 0 && index < 7) dueDays[index] = dueResult.getLong(1);
+    } while (dueResult.goToNextRow()); } finally { dueResult.close(); }
+    let totalReviews = 0; let recentReviews = 0; let recentSuccessful = 0;
+    const eventResult = await store.querySql(`WITH events AS (
+      SELECT algorithm, feedback, reviewed_at FROM review_event_v2
+      UNION ALL SELECT algorithm, feedback, reviewed_at FROM review_event_v3)
+      SELECT COUNT(*), COALESCE(SUM(CASE WHEN reviewed_at >= ? THEN 1 ELSE 0 END), 0),
+      COALESCE(SUM(CASE WHEN reviewed_at >= ? AND ((algorithm = 'memory_fsrs_6' AND feedback >= 3)
+      OR (algorithm = 'math_mastery_ladder' AND feedback >= 2)) THEN 1 ELSE 0 END), 0) FROM events`,
+      [historyStart, historyStart]);
+    try { if (eventResult.goToFirstRow()) { totalReviews = eventResult.getLong(0);
+      recentReviews = eventResult.getLong(1); recentSuccessful = eventResult.getLong(2); }
+    } finally { eventResult.close(); }
+    const reviewedDates: Set<string> = new Set<string>();
+    const datesResult = await store.querySql(`SELECT reviewed_at FROM review_event_v2 WHERE reviewed_at >= ?
+      UNION ALL SELECT reviewed_at FROM review_event_v3 WHERE reviewed_at >= ?`,
+      [dayStart - 366 * 86400, dayStart - 366 * 86400]);
+    try { if (datesResult.goToFirstRow()) do {
+      reviewedDates.add(this.dateKey(new Date(datesResult.getLong(0) * 1000)));
+    } while (datesResult.goToNextRow()); } finally { datesResult.close(); }
+    let streakDate = new Date(); streakDate.setHours(0, 0, 0, 0);
+    if (!reviewedDates.has(this.dateKey(streakDate))) streakDate.setDate(streakDate.getDate() - 1);
+    let streakDays = 0;
+    while (reviewedDates.has(this.dateKey(streakDate)) && streakDays < 366) {
+      streakDays += 1; streakDate.setDate(streakDate.getDate() - 1);
+    }
+    let activeItems = 0; let masteredItems = 0;
+    const progressResult = await store.querySql(`SELECT COUNT(*),
+      COALESCE(SUM(CASE WHEN repetitions >= 3 AND stability_days >= 14 THEN 1 ELSE 0 END), 0)
+      FROM study_item WHERE deleted_at IS NULL AND suspended_at IS NULL`);
+    try { if (progressResult.goToFirstRow()) { activeItems = progressResult.getLong(0);
+      masteredItems = progressResult.getLong(1); } } finally { progressResult.close(); }
+    const subjects: SubjectInsight[] = [];
+    const subjectResult = await store.querySql(`SELECT subject, COUNT(*),
+      COALESCE(SUM(CASE WHEN repetitions >= 3 AND stability_days >= 14 THEN 1 ELSE 0 END), 0)
+      FROM study_item WHERE deleted_at IS NULL AND suspended_at IS NULL GROUP BY subject ORDER BY COUNT(*) DESC`);
+    try { if (subjectResult.goToFirstRow()) do { subjects.push({ subject: subjectResult.getString(0),
+      total: subjectResult.getLong(1), mastered: subjectResult.getLong(2) });
+    } while (subjectResult.goToNextRow()); } finally { subjectResult.close(); }
+    return { overdue: overdue, dueToday: dueToday, newItems: newItems,
+      reviewsToday: reviewDays[6], accuracyPercent: recentReviews === 0 ? 0 :
+        Math.floor(recentSuccessful * 100 / recentReviews), streakDays: streakDays,
+      totalReviews: totalReviews, activeItems: activeItems, masteredItems: masteredItems,
+      reviewDays: reviewDays, dueDays: dueDays, subjects: subjects };
+  }
+
+  private dateKey(value: Date): string {
+    return `${value.getFullYear()}-${value.getMonth() + 1}-${value.getDate()}`;
   }
 
   async items(query: string = ''): Promise<StudyItem[]> {

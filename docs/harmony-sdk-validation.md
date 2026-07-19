@@ -1,6 +1,6 @@
 # HarmonyOS 6 SDK validation gate
 
-The v0.4.0 project targets Stage model and `compatibleSdkVersion 6.0.0(20)`.
+The v0.5.0 project targets Stage model and `compatibleSdkVersion 6.0.0(20)`.
 That level is not considered validated by source review alone. The release job
 requires a self-hosted runner carrying labels `harmonyos-6` and `api-20`; it must
 use the current stable DevEco Studio toolchain and fail before publishing unless

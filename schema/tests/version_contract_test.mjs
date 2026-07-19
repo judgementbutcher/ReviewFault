@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import { readFileSync, readdirSync } from 'node:fs';
 
-const version = '0.4.0';
+const version = '0.5.0';
 const read = (relative) => readFileSync(new URL(relative, import.meta.url), 'utf8');
 
 const contracts = [
@@ -21,9 +21,9 @@ const contracts = [
 for (const [name, path, token] of contracts) {
   assert(read(path).includes(token), `${name} is not synchronized to ${version}`);
 }
-assert(read('../../apps/android/app/build.gradle.kts').includes('versionCode = 9') &&
-  read('../../apps/harmony/AppScope/app.json5').includes('"versionCode": 9'),
-  'mobile version codes must advance together for v0.4.0');
+assert(read('../../apps/android/app/build.gradle.kts').includes('versionCode = 10') &&
+  read('../../apps/harmony/AppScope/app.json5').includes('"versionCode": 10'),
+  'mobile version codes must advance together for v0.5.0');
 
 for (const repository of ['../../apps/windows/ReviewFault/Data/AppRepository.cs']) {
   assert(read(repository).includes(version), `${repository} backup metadata is stale`);
@@ -41,7 +41,7 @@ assert.deepEqual(readdirSync(new URL('../../apps/', import.meta.url)).sort(),
   ['android', 'harmony', 'windows'], 'all supported platform clients must be present');
 assert(release.includes('needs: [core, backend, android, harmony, windows]'),
   'release workflow must be gated on core, service, and all platform builds');
-assert(release.includes('test "$GITHUB_REF_NAME" = "v$APP_VERSION"'),
+assert(release.includes('test "$RELEASE_REF" = "v$APP_VERSION"'),
   'release tag must match application metadata');
 assert(release.includes(`body_path: docs/release-v${version}.md`),
   'GitHub release must use the current version notes');

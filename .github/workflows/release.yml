@@ -1,7 +1,7 @@
 name: release
 
 env:
-  APP_VERSION: 0.4.0
+  APP_VERSION: 0.5.0
   RELEASE_REF: ${{ inputs.release_ref || github.ref_name }}
 
 on:
@@ -10,9 +10,9 @@ on:
   workflow_dispatch:
     inputs:
       release_ref:
-        description: 'Release tag to build (for example v0.4.0)'
+        description: 'Release tag to build (for example v0.5.0)'
         required: true
-        default: v0.4.0
+        default: v0.5.0
         type: string
       include_harmony:
         description: 'Build and attach the signed HarmonyOS HAP'
@@ -287,7 +287,7 @@ jobs:
         with:
           tag_name: ${{ env.RELEASE_REF }}
           name: ReviewFault v${{ env.APP_VERSION }}
-          body_path: docs/release-v0.4.0.md
+          body_path: docs/release-v0.5.0.md
           files: |
             ReviewFault-android-v${{ env.APP_VERSION }}.apk
             ReviewFault-windows-v${{ env.APP_VERSION }}-x64.msi

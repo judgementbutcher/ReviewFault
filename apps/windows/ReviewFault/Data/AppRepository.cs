@@ -26,6 +26,12 @@ public sealed record StudyRow(
 public sealed record DashboardSummary(
     int Overdue, int DueToday, int NewItems, int EstimatedMinutes,
     int DeferredDueMinutes, int TomorrowDue, int NextSevenDaysDue);
+public sealed record InsightDay(string Label, string DueLabel, int Reviews, int Due);
+public sealed record SubjectInsight(string Subject, int Total, int Mastered);
+public sealed record InsightsSnapshot(
+    int ReviewsToday, int AccuracyPercent, int StreakDays, int TotalReviews,
+    int ActiveItems, int MasteredItems,
+    IReadOnlyList<InsightDay> Days, IReadOnlyList<SubjectInsight> Subjects);
 public sealed record LearningPreferences(
     int DailyNewMemoryLimit, int SessionMinutes, string MemoryPreset,
     string MathIntensity, bool IncludeMemoryCards, bool IncludeMathProblems,
@@ -44,7 +50,7 @@ public sealed record MissingMediaObject(string Sha256, string FilePath);
 
 public sealed class AppRepository
 {
-    private const string AppVersion = "0.4.0";
+    private const string AppVersion = "0.5.0";
     private const long MaxBackupBytes = 2L * 1024 * 1024 * 1024;
     private const int MaxBackupEntries = 10_000;
     // The v1 review_log remains read-only input for gradual history replay.
@@ -759,6 +765,117 @@ public sealed class AppRepository
             (focusSeconds + 59) / 60,
             (Math.Max(0, dueSeconds - budgetSeconds) + 59) / 60,
             reader.GetInt32(8), reader.GetInt32(9));
+    }
+
+    public async Task<InsightsSnapshot> InsightsAsync(long now, long dayStart)
+    {
+        await using var connection = await OpenAsync();
+        var historyStart = dayStart - 6 * 86_400L;
+        var reviewByDay = new Dictionary<int, int>();
+        await using (var command = connection.CreateCommand())
+        {
+            command.CommandText = """
+                WITH events AS (
+                  SELECT reviewed_at FROM review_event_v2
+                  UNION ALL SELECT reviewed_at FROM review_event_v3
+                )
+                SELECT CAST((reviewed_at - $historyStart) / 86400 AS INTEGER), COUNT(*)
+                FROM events WHERE reviewed_at >= $historyStart AND reviewed_at < $historyEnd
+                GROUP BY 1
+                """;
+            command.Parameters.AddWithValue("$historyStart", historyStart);
+            command.Parameters.AddWithValue("$historyEnd", dayStart + 86_400L);
+            await using var reader = await command.ExecuteReaderAsync();
+            while (await reader.ReadAsync()) reviewByDay[reader.GetInt32(0)] = reader.GetInt32(1);
+        }
+        var dueByDay = new Dictionary<int, int>();
+        await using (var command = connection.CreateCommand())
+        {
+            command.CommandText = """
+                SELECT CAST((due_at - $dayStart) / 86400 AS INTEGER), COUNT(*)
+                FROM study_item
+                WHERE deleted_at IS NULL AND suspended_at IS NULL AND scheduler_state <> 0
+                  AND due_at >= $dayStart AND due_at < $weekEnd
+                GROUP BY 1
+                """;
+            command.Parameters.AddWithValue("$dayStart", dayStart);
+            command.Parameters.AddWithValue("$weekEnd", dayStart + 7 * 86_400L);
+            await using var reader = await command.ExecuteReaderAsync();
+            while (await reader.ReadAsync()) dueByDay[reader.GetInt32(0)] = reader.GetInt32(1);
+        }
+        var today = DateOnly.FromDateTime(DateTimeOffset.FromUnixTimeSeconds(dayStart).LocalDateTime);
+        var culture = System.Globalization.CultureInfo.GetCultureInfo("zh-CN");
+        var days = Enumerable.Range(0, 7).Select(index => new InsightDay(
+            culture.DateTimeFormat.GetShortestDayName(today.AddDays(index - 6).DayOfWeek),
+            culture.DateTimeFormat.GetShortestDayName(today.AddDays(index).DayOfWeek),
+            reviewByDay.GetValueOrDefault(index), dueByDay.GetValueOrDefault(index))).ToArray();
+
+        var totalReviews = 0; var recentReviews = 0; var recentSuccessful = 0;
+        await using (var command = connection.CreateCommand())
+        {
+            command.CommandText = """
+                WITH events AS (
+                  SELECT algorithm, feedback, reviewed_at FROM review_event_v2
+                  UNION ALL SELECT algorithm, feedback, reviewed_at FROM review_event_v3
+                )
+                SELECT COUNT(*),
+                  COALESCE(SUM(CASE WHEN reviewed_at >= $historyStart THEN 1 ELSE 0 END), 0),
+                  COALESCE(SUM(CASE WHEN reviewed_at >= $historyStart AND (
+                    (algorithm = 'memory_fsrs_6' AND feedback >= 3) OR
+                    (algorithm = 'math_mastery_ladder' AND feedback >= 2)
+                  ) THEN 1 ELSE 0 END), 0)
+                FROM events
+                """;
+            command.Parameters.AddWithValue("$historyStart", historyStart);
+            await using var reader = await command.ExecuteReaderAsync();
+            await reader.ReadAsync();
+            totalReviews = reader.GetInt32(0); recentReviews = reader.GetInt32(1);
+            recentSuccessful = reader.GetInt32(2);
+        }
+        var reviewedDates = new HashSet<DateOnly>();
+        await using (var command = connection.CreateCommand())
+        {
+            command.CommandText = """
+                SELECT reviewed_at FROM review_event_v2 WHERE reviewed_at >= $start
+                UNION ALL SELECT reviewed_at FROM review_event_v3 WHERE reviewed_at >= $start
+                """;
+            command.Parameters.AddWithValue("$start", dayStart - 366 * 86_400L);
+            await using var reader = await command.ExecuteReaderAsync();
+            while (await reader.ReadAsync()) reviewedDates.Add(DateOnly.FromDateTime(
+                DateTimeOffset.FromUnixTimeSeconds(reader.GetInt64(0)).LocalDateTime));
+        }
+        var streakDate = today;
+        if (!reviewedDates.Contains(streakDate)) streakDate = streakDate.AddDays(-1);
+        var streakDays = 0;
+        while (reviewedDates.Contains(streakDate)) { streakDays++; streakDate = streakDate.AddDays(-1); }
+
+        var activeItems = 0; var masteredItems = 0;
+        await using (var command = connection.CreateCommand())
+        {
+            command.CommandText = """
+                SELECT COUNT(*), COALESCE(SUM(CASE WHEN repetitions >= 3 AND stability_days >= 14 THEN 1 ELSE 0 END), 0)
+                FROM study_item WHERE deleted_at IS NULL AND suspended_at IS NULL
+                """;
+            await using var reader = await command.ExecuteReaderAsync(); await reader.ReadAsync();
+            activeItems = reader.GetInt32(0); masteredItems = reader.GetInt32(1);
+        }
+        var subjects = new List<SubjectInsight>();
+        await using (var command = connection.CreateCommand())
+        {
+            command.CommandText = """
+                SELECT subject, COUNT(*),
+                  COALESCE(SUM(CASE WHEN repetitions >= 3 AND stability_days >= 14 THEN 1 ELSE 0 END), 0)
+                FROM study_item WHERE deleted_at IS NULL AND suspended_at IS NULL
+                GROUP BY subject ORDER BY COUNT(*) DESC
+                """;
+            await using var reader = await command.ExecuteReaderAsync();
+            while (await reader.ReadAsync()) subjects.Add(new SubjectInsight(
+                reader.GetString(0), reader.GetInt32(1), reader.GetInt32(2)));
+        }
+        return new InsightsSnapshot(
+            reviewByDay.GetValueOrDefault(6),
+            recentReviews == 0 ? 0 : recentSuccessful * 100 / recentReviews,
+            streakDays, totalReviews, activeItems, masteredItems, days, subjects);
     }
 
     public async Task<StudyRow?> NextForReviewAsync(
