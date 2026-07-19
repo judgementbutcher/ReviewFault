@@ -1,6 +1,6 @@
 # ReviewFault v0.4.0
 
-v0.4.0 建立账号同步、平板布局和 HarmonyOS 6 原生客户端。调度算法继续使用冻结的 v3 参数；ABI v4 只增加跨设备确定性历史重放。
+v0.4.0 建立账号同步、平板布局和原生客户端。调度算法继续使用冻结的 v3 参数；ABI v4 只增加跨设备确定性历史重放。本次先发布 Android 与 Windows，HarmonyOS 6 产物待后续补发。
 
 ## 数据与同步
 
@@ -23,13 +23,13 @@ v0.4.0 建立账号同步、平板布局和 HarmonyOS 6 原生客户端。调度
 
 ## 发布校验
 
-同一 tag 只有在 core、backend、Android、Harmony 和 Windows 全部通过后发布。附件包含签名 APK、签名 HAP、Windows MSI/ZIP、同步镜像摘要与 SHA-256 清单。
+同一 tag 在 core、backend、Android 和 Windows 通过后即可发布。当前附件包含签名 APK、Windows MSI/ZIP、同步镜像摘要与 SHA-256 清单；HarmonyOS HAP 可在后续手动发布中追加。
 
 ## 升级与安装
 
 - Android：安装 `ReviewFault-android-v0.4.0.apk`；持久发布证书允许从 v0.3.2 覆盖升级并保留本地数据。
 - Windows：优先使用 `ReviewFault-windows-v0.4.0-x64.msi`，也提供自包含便携 ZIP。
-- HarmonyOS 6：安装签名 HAP；这是新的应用身份，不支持覆盖历史 Harmony 包。
+- HarmonyOS 6：后续补发签名 HAP；这是新的应用身份，不支持覆盖历史 Harmony 包。
 - 同步服务：按 `sync-image-digest.txt` 固定镜像摘要部署，并在首次开放注册前配置 SMTP、对象存储、主密钥和离线备份。
 
 数据库会按 v1→v2→v3→v4 顺序迁移。升级前仍建议导出备份；v4 备份有意不包含账号令牌、设备身份和同步队列，恢复后需重新登录。

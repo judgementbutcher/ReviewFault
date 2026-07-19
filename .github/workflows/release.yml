@@ -2,10 +2,23 @@ name: release
 
 env:
   APP_VERSION: 0.4.0
+  RELEASE_REF: ${{ inputs.release_ref || github.ref_name }}
 
 on:
   push:
     tags: ['v*']
+  workflow_dispatch:
+    inputs:
+      release_ref:
+        description: 'Release tag to build (for example v0.4.0)'
+        required: true
+        default: v0.4.0
+        type: string
+      include_harmony:
+        description: 'Build and attach the signed HarmonyOS HAP'
+        required: true
+        default: false
+        type: boolean
 
 permissions:
   contents: write
@@ -19,6 +32,8 @@ jobs:
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v4
+        with:
+          ref: ${{ env.RELEASE_REF }}
       - uses: actions/setup-node@v4
         with:
           node-version: 22
@@ -28,7 +43,7 @@ jobs:
             8.0.x
             10.0.x
       - name: Verify release tag
-        run: test "$GITHUB_REF_NAME" = "v$APP_VERSION"
+        run: test "$RELEASE_REF" = "v$APP_VERSION"
       - run: make test
       - name: Verify Windows repository integration
         run: dotnet run --project apps/windows/ReviewFault.HeadlessTests
@@ -39,6 +54,8 @@ jobs:
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v4
+        with:
+          ref: ${{ env.RELEASE_REF }}
       - uses: actions/setup-java@v4
         with:
           distribution: temurin
@@ -91,8 +108,10 @@ jobs:
       packages: write
     steps:
       - uses: actions/checkout@v4
+        with:
+          ref: ${{ env.RELEASE_REF }}
       - name: Verify release tag
-        run: test "$GITHUB_REF_NAME" = "v$APP_VERSION"
+        run: test "$RELEASE_REF" = "v$APP_VERSION"
       - uses: docker/login-action@v3
         with:
           registry: ghcr.io
@@ -112,16 +131,19 @@ jobs:
           path: sync-image-digest.txt
 
   harmony:
+    if: inputs.include_harmony == true
     runs-on: [self-hosted, harmonyos-6, api-20]
     steps:
       - uses: actions/checkout@v4
+        with:
+          ref: ${{ env.RELEASE_REF }}
       - uses: actions/setup-node@v4
         with:
           node-version: 22
       - name: Verify release tag and signing tools
         shell: bash
         run: |
-          test "$GITHUB_REF_NAME" = "v$APP_VERSION"
+          test "$RELEASE_REF" = "v$APP_VERSION"
           test -x "${HVIGORW:?HVIGORW is required on the Harmony runner}"
           test -x "${HAP_VERIFY_TOOL:?HAP_VERIFY_TOOL is required on the Harmony runner}"
           command -v jq
@@ -156,6 +178,8 @@ jobs:
     runs-on: windows-2022
     steps:
       - uses: actions/checkout@v4
+        with:
+          ref: ${{ env.RELEASE_REF }}
       - uses: actions/setup-dotnet@v4
         with:
           dotnet-version: |
@@ -240,6 +264,13 @@ jobs:
 
   publish:
     needs: [core, backend, android, harmony, windows]
+    if: >-
+      always() &&
+      needs.core.result == 'success' &&
+      needs.backend.result == 'success' &&
+      needs.android.result == 'success' &&
+      needs.windows.result == 'success' &&
+      (needs.harmony.result == 'success' || needs.harmony.result == 'skipped')
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v4
@@ -251,16 +282,21 @@ jobs:
           sha256sum "ReviewFault-android-v${APP_VERSION}.apk"
           "ReviewFault-windows-v${APP_VERSION}-x64.msi"
           "ReviewFault-windows-v${APP_VERSION}-x64.zip"
-          "ReviewFault-harmony-v${APP_VERSION}-signed.hap"
           sync-image-digest.txt > SHA256SUMS
       - uses: softprops/action-gh-release@v2
         with:
+          tag_name: ${{ env.RELEASE_REF }}
           name: ReviewFault v${{ env.APP_VERSION }}
           body_path: docs/release-v0.4.0.md
           files: |
             ReviewFault-android-v${{ env.APP_VERSION }}.apk
-            ReviewFault-harmony-v${{ env.APP_VERSION }}-signed.hap
             ReviewFault-windows-v${{ env.APP_VERSION }}-x64.msi
             ReviewFault-windows-v${{ env.APP_VERSION }}-x64.zip
             sync-image-digest.txt
             SHA256SUMS
+      - name: Attach HarmonyOS release
+        if: needs.harmony.result == 'success'
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ env.RELEASE_REF }}
+          files: ReviewFault-harmony-v${{ env.APP_VERSION }}-signed.hap
