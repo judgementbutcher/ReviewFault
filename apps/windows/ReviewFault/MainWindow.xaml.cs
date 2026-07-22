@@ -291,7 +291,7 @@ public sealed class MainWindow : Window
     {
         try
         {
-            var result = await new UpdateService().CheckAsync("0.6.0");
+            var result = await new UpdateService().CheckAsync("0.6.1");
             if (!result.IsAvailable)
             {
                 await MessageAsync($"当前已是最新版本（v{result.CurrentVersion}）。");

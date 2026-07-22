@@ -69,6 +69,9 @@ data class AppUiState(
     val syncPendingCount: Int = 0,
     val lastSyncedAt: Long? = null,
     val syncInProgress: Boolean = false,
+    val availableUpdate: AvailableUpdate? = null,
+    val downloadedUpdatePath: String? = null,
+    val updateInProgress: Boolean = false,
 )
 
 @OptIn(FlowPreview::class)
@@ -135,6 +138,7 @@ class AppViewModel(application: Application, private val savedState: SavedStateH
         viewModelScope.launch {
             searchQuery.collectLatest { savedState["searchQuery"] = it }
         }
+        if (mutableState.value.destination == AppDestination.Add) loadTags()
     }
 
     fun navigate(destination: AppDestination) {
@@ -148,9 +152,14 @@ class AppViewModel(application: Application, private val savedState: SavedStateH
             AppDestination.Today -> refreshToday()
             AppDestination.Insights -> refreshInsights()
             AppDestination.Library -> loadLibrary()
+            AppDestination.Add -> loadTags()
             AppDestination.Settings -> { loadSettings(); loadTrash() }
             else -> Unit
         }
+    }
+
+    private fun loadTags() = io {
+        mutableState.update { it.copy(availableTags = database.tags()) }
     }
 
     fun setLibraryFilter(subject: String? = null, kind: String? = null, status: String? = null) {
@@ -253,6 +262,25 @@ class AppViewModel(application: Application, private val savedState: SavedStateH
             )
         }
         startReviewNow()
+    }
+
+    fun startNewLearning() = io(exclusive = true) {
+        val row = database.nextUnlearned()
+        if (row == null) {
+            mutableState.update { it.copy(message = "当前没有等待首次学习的内容") }
+            return@io
+        }
+        mutableState.update { it.copy(
+            destination = AppDestination.Review,
+            current = row,
+            answerRevealed = false,
+            startedAt = Instant.now().epochSecond,
+            sessionTargetSeconds = it.preferences.sessionMinutes.coerceAtLeast(1) * 60,
+            sessionElapsedSeconds = 0,
+            sessionReviewedCount = 0,
+            sessionAllowsNewItems = true,
+            sessionSkippedIds = emptySet(),
+        ) }
     }
 
     private fun startReviewNow(message: String? = null) {
@@ -486,7 +514,7 @@ class AppViewModel(application: Application, private val savedState: SavedStateH
 
     fun createMemoryCard(draft: MemoryCardDraft) = io(exclusive = true) {
         database.createMemoryCard(draft)
-        mutableState.update { it.copy(destination = AppDestination.Today, message = "408 知识卡已保存") }
+        mutableState.update { it.copy(destination = AppDestination.Today, message = "知识卡已保存，可立即开始首次学习") }
         refreshTodayNow(); loadLibrary(); syncNow()
     }
 
@@ -499,8 +527,37 @@ class AppViewModel(application: Application, private val savedState: SavedStateH
 
     fun createMathProblem(uris: List<Uri>, draft: MathErrorDraft) = io(exclusive = true) {
         database.createMathProblemFromImages(getApplication<Application>().contentResolver, uris, draft)
-        mutableState.update { it.copy(destination = AppDestination.Today, message = "数学错题与诊断已保存") }
+        mutableState.update { it.copy(destination = AppDestination.Today, message = "数学错题已保存，可立即开始首次学习") }
         refreshTodayNow(); loadLibrary(); syncNow()
+    }
+
+    fun checkForUpdates() = io {
+        if (mutableState.value.updateInProgress) return@io
+        mutableState.update { it.copy(updateInProgress = true, downloadedUpdatePath = null) }
+        try {
+            val update = UpdateService(getApplication()).check(BuildConfig.VERSION_NAME)
+            mutableState.update { it.copy(
+                availableUpdate = update,
+                message = if (update == null) "当前已是最新版本（v${BuildConfig.VERSION_NAME}）" else "发现新版本 v${update.version}",
+            ) }
+        } finally {
+            mutableState.update { it.copy(updateInProgress = false) }
+        }
+    }
+
+    fun downloadUpdate() = io {
+        if (mutableState.value.updateInProgress) return@io
+        val update = mutableState.value.availableUpdate ?: return@io
+        mutableState.update { it.copy(updateInProgress = true) }
+        try {
+            val file = UpdateService(getApplication()).download(update)
+            mutableState.update { it.copy(
+                downloadedUpdatePath = file.absolutePath,
+                message = "v${update.version} 已下载，请确认安装",
+            ) }
+        } finally {
+            mutableState.update { it.copy(updateInProgress = false) }
+        }
     }
 
     fun exportBackup(uri: Uri) = io(exclusive = true) {

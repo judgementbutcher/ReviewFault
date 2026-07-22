@@ -2,7 +2,7 @@
 
 ReviewFault 是面向考研数学与 408 的本地优先间隔学习软件。它不是把两类内容都压成普通闪卡：数学侧强调低摩擦记录、重做与错因复盘；408 侧强调主动回忆、分层提示与知识点关联。
 
-当前开发版本为 **0.6.0**，引入 **schema v5、调度 ABI v5、备份协议 v5**：数学以错题簇阶段验证，408 以知识包的证据驱动主动回忆调度；旧 v1-v4 历史仍通过冻结算法回放。
+当前版本为 **0.6.1**，保持 **schema v5、调度 ABI v5、备份协议 v5**，并优化 Android 首次学习、渐进制卡、标签补全与应用内更新体验。
 
 - Android：Kotlin + Jetpack Compose
 - Windows：C# + WinUI 3
@@ -33,6 +33,7 @@ Android 调试 APK 在完成 Android 构建后位于 `apps/android/app/build/out
 - [需求验证矩阵](docs/verification.md)
 - [视觉与无障碍 token](docs/design-tokens.md)
 - [HarmonyOS 6 SDK 验证门禁](docs/harmony-sdk-validation.md)
+- [v0.6.1 发布说明](docs/release-v0.6.1.md)
 - [v0.6.0 发布说明](docs/release-v0.6.0.md)
 - [v0.4.0 发布说明](docs/release-v0.4.0.md)
 - [v0.2 调度回放基线](docs/baseline-v0.2.md)

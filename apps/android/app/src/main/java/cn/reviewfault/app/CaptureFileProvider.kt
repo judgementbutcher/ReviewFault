@@ -12,7 +12,10 @@ import java.io.File
 class CaptureFileProvider : ContentProvider() {
     override fun onCreate(): Boolean = true
 
-    override fun getType(uri: Uri): String = "image/jpeg"
+    override fun getType(uri: Uri): String = when (uri.pathSegments.firstOrNull()) {
+        "updates" -> "application/vnd.android.package-archive"
+        else -> "image/jpeg"
+    }
 
     override fun openFile(uri: Uri, mode: String): ParcelFileDescriptor {
         val file = resolve(uri)
@@ -55,9 +58,15 @@ class CaptureFileProvider : ContentProvider() {
                         selectionArgs: Array<out String>?): Int = 0
 
     private fun resolve(uri: Uri): File {
+        val area = uri.pathSegments.firstOrNull().orEmpty()
         val name = uri.lastPathSegment.orEmpty()
-        require(name.matches(Regex("[A-Za-z0-9-]+\\.jpg"))) { "非法拍照临时文件名" }
-        val root = File(requireNotNull(context).cacheDir, "capture")
+        val valid = when (area) {
+            "capture" -> name.matches(Regex("[A-Za-z0-9-]+\\.jpg"))
+            "updates" -> name.matches(Regex("ReviewFault-android-v[0-9]+\\.[0-9]+\\.[0-9]+\\.apk"))
+            else -> false
+        }
+        require(valid) { "非法共享文件名" }
+        val root = File(requireNotNull(context).cacheDir, area)
         val file = File(root, name)
         require(file.canonicalPath.startsWith(root.canonicalPath + File.separator)) {
             "非法拍照临时路径"

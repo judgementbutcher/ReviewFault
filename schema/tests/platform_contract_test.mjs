@@ -63,4 +63,21 @@ for (const [name, repositoryPath, uiPath] of [
     `${name} UI is missing the modern dark foundation`);
 }
 
+const androidUi = readFileSync(new URL(
+  '../../apps/android/app/src/main/java/cn/reviewfault/app/MainActivity.kt', import.meta.url), 'utf8');
+const androidViewModel = readFileSync(new URL(
+  '../../apps/android/app/src/main/java/cn/reviewfault/app/AppViewModel.kt', import.meta.url), 'utf8');
+const androidUpdater = readFileSync(new URL(
+  '../../apps/android/app/src/main/java/cn/reviewfault/app/UpdateService.kt', import.meta.url), 'utf8');
+const androidManifest = readFileSync(new URL(
+  '../../apps/android/app/src/main/AndroidManifest.xml', import.meta.url), 'utf8');
+for (const token of ['ForecastMetric', 'TagInput', 'DropdownChoice', '学习新内容', '检查更新'])
+  assert(androidUi.includes(token), `Android v0.6.1 UI is missing ${token}`);
+assert(androidViewModel.includes('startNewLearning') && androidViewModel.includes('nextUnlearned'),
+  'Android must provide a direct first-learning route');
+assert(androidUpdater.includes('/judgementbutcher/ReviewFault/releases/download/') &&
+  androidUpdater.includes('requireTrustedDownload'), 'Android updater must pin release download paths');
+assert(androidManifest.includes('REQUEST_INSTALL_PACKAGES'),
+  'Android updater must declare package installation permission');
+
 console.log('Platform source contract tests passed');

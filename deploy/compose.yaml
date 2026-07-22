@@ -28,7 +28,7 @@ services:
       retries: 10
 
   sync:
-    image: ${SYNC_IMAGE:-reviewfault-sync:0.6.0}
+    image: ${SYNC_IMAGE:-reviewfault-sync:0.6.1}
     build:
       context: ..
       dockerfile: services/sync/Dockerfile

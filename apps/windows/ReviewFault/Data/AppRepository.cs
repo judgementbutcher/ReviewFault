@@ -82,7 +82,7 @@ public sealed record MissingMediaObject(string Sha256, string FilePath);
 
 public sealed class AppRepository
 {
-    private const string AppVersion = "0.6.0";
+    private const string AppVersion = "0.6.1";
     private const long MaxBackupBytes = 2L * 1024 * 1024 * 1024;
     private const int MaxBackupEntries = 10_000;
     // The v1 review_log remains read-only input for gradual history replay.

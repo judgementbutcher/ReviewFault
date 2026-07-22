@@ -1,11 +1,13 @@
 package cn.reviewfault.app
 
 import android.Manifest
+import android.content.Intent
 import android.content.pm.PackageManager
 import android.graphics.BitmapFactory
 import android.os.Build
 import android.os.Bundle
 import android.net.Uri
+import android.provider.Settings
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.BackHandler
 import androidx.activity.compose.rememberLauncherForActivityResult
@@ -56,6 +58,7 @@ import androidx.compose.material.icons.filled.CloudSync
 import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.DarkMode
 import androidx.compose.material.icons.filled.DeleteOutline
+import androidx.compose.material.icons.filled.Download
 import androidx.compose.material.icons.filled.ExpandMore
 import androidx.compose.material.icons.filled.Home
 import androidx.compose.material.icons.filled.Image
@@ -65,6 +68,7 @@ import androidx.compose.material.icons.filled.Restore
 import androidx.compose.material.icons.filled.School
 import androidx.compose.material.icons.filled.Search
 import androidx.compose.material.icons.filled.Settings
+import androidx.compose.material.icons.filled.SystemUpdateAlt
 import androidx.compose.material.icons.filled.Tune
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
@@ -72,6 +76,8 @@ import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
 import androidx.compose.material3.Checkbox
 import androidx.compose.material3.ElevatedCard
+import androidx.compose.material3.DropdownMenu
+import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.FilterChip
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
@@ -119,13 +125,13 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.lifecycle.viewmodel.compose.viewModel
-import androidx.core.content.FileProvider
 import java.io.File
 import java.time.LocalDate
 import cn.reviewfault.app.data.LearningPreferences
 import cn.reviewfault.app.data.MathErrorDraft
 import cn.reviewfault.app.data.MemoryCardDraft
 import cn.reviewfault.app.data.StudyRow
+import cn.reviewfault.app.data.TagRow
 import org.json.JSONArray
 import org.json.JSONObject
 
@@ -265,7 +271,7 @@ private fun ReviewFaultApp(state: AppUiState, model: AppViewModel) {
                     AppDestination.Today -> TodayScreen(state, model)
                     AppDestination.Insights -> InsightsScreen(state)
                     AppDestination.Library -> LibraryScreen(state, model)
-                    AppDestination.Add -> AddScreen(model)
+                    AppDestination.Add -> AddScreen(state, model)
                     AppDestination.Settings -> SettingsScreen(state, model)
                     AppDestination.Review -> ReviewScreen(state, model)
                 }
@@ -339,7 +345,8 @@ private fun PageHeader(eyebrow: String, title: String, subtitle: String) {
 @Composable
 private fun TodayScreen(state: AppUiState, model: AppViewModel) = Page {
     PageHeader("ReviewFault", "今天，专注一小步", "复习顺序已经排好，你只需要开始。")
-    val total = state.summary.overdue + state.summary.dueToday + state.summary.newItems
+    val dueTotal = state.summary.overdue + state.summary.dueToday
+    val total = dueTotal + state.summary.newItems
     ElevatedCard(
         modifier = Modifier.fillMaxWidth().animateContentSize(),
         shape = RoundedCornerShape(8.dp),
@@ -379,13 +386,33 @@ private fun TodayScreen(state: AppUiState, model: AppViewModel) = Page {
                 SummaryPill("新内容", state.summary.newItems, Modifier.weight(1f))
             }
             Button(
-                onClick = { if (total == 0) model.navigate(AppDestination.Add) else model.startReview() },
+                onClick = {
+                    when {
+                        dueTotal > 0 -> model.startReview()
+                        state.summary.newItems > 0 -> model.startNewLearning()
+                        else -> model.navigate(AppDestination.Add)
+                    }
+                },
                 modifier = Modifier.fillMaxWidth().height(56.dp),
                 shape = RoundedCornerShape(8.dp),
             ) {
-                Text(if (total == 0) "添加第一条内容" else "开始专注轮次")
+                Text(when {
+                    dueTotal > 0 -> "开始专注轮次"
+                    state.summary.newItems > 0 -> "学习新内容"
+                    else -> "添加第一条内容"
+                })
                 Spacer(Modifier.width(8.dp))
                 Icon(if (total == 0) Icons.Default.Add else Icons.AutoMirrored.Filled.ArrowForward, contentDescription = null, Modifier.size(19.dp))
+            }
+            if (dueTotal > 0 && state.summary.newItems > 0) {
+                OutlinedButton(
+                    onClick = model::startNewLearning,
+                    modifier = Modifier.fillMaxWidth().height(48.dp),
+                ) {
+                    Icon(Icons.Default.School, null, Modifier.size(18.dp))
+                    Spacer(Modifier.width(8.dp))
+                    Text("学习新内容 · ${state.summary.newItems} 条待开始")
+                }
             }
         }
     }
@@ -394,18 +421,18 @@ private fun TodayScreen(state: AppUiState, model: AppViewModel) = Page {
         shape = RoundedCornerShape(8.dp),
         colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = .5f)),
     ) {
-        Row(
+        Column(
             Modifier.fillMaxWidth().padding(17.dp),
-            horizontalArrangement = Arrangement.SpaceBetween,
-            verticalAlignment = Alignment.CenterVertically,
+            verticalArrangement = Arrangement.spacedBy(14.dp),
         ) {
-            Column {
+            Column(Modifier.fillMaxWidth()) {
                 Text("学习负载预报", style = MaterialTheme.typography.titleMedium)
                 Text("提前看见波峰，更容易保持节奏", color = MaterialTheme.colorScheme.onSurfaceVariant)
             }
-            Column(horizontalAlignment = Alignment.End) {
-                Text("明日 ${state.summary.tomorrowDue} 条", style = MaterialTheme.typography.titleSmall)
-                Text("未来 7 天 ${state.summary.nextSevenDaysDue} 条", color = MaterialTheme.colorScheme.onSurfaceVariant)
+            HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant)
+            Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(10.dp)) {
+                ForecastMetric("明日", state.summary.tomorrowDue, Modifier.weight(1f))
+                ForecastMetric("未来 7 天", state.summary.nextSevenDaysDue, Modifier.weight(1f))
             }
         }
     }
@@ -428,6 +455,16 @@ private fun TodayScreen(state: AppUiState, model: AppViewModel) = Page {
             IconButton(onClick = { model.navigate(AppDestination.Settings) }) {
                 Icon(Icons.AutoMirrored.Filled.ArrowForward, contentDescription = "调整学习节奏")
             }
+        }
+    }
+}
+
+@Composable
+private fun ForecastMetric(label: String, count: Int, modifier: Modifier = Modifier) {
+    Surface(modifier = modifier, shape = RoundedCornerShape(6.dp), color = MaterialTheme.colorScheme.surface) {
+        Column(Modifier.padding(horizontal = 14.dp, vertical = 12.dp), verticalArrangement = Arrangement.spacedBy(2.dp)) {
+            Text(label, style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
+            Text("$count 条", style = MaterialTheme.typography.titleLarge)
         }
     }
 }
@@ -686,7 +723,7 @@ private fun EmptyLibrary(onAdd: () -> Unit) {
 }
 
 @Composable
-private fun AddScreen(model: AppViewModel) = Page {
+private fun AddScreen(state: AppUiState, model: AppViewModel) = Page {
     val context = LocalContext.current
     var kind by rememberSaveable { mutableStateOf("choice") }
     var subject by rememberSaveable { mutableStateOf("operating_systems") }
@@ -710,6 +747,9 @@ private fun AddScreen(model: AppViewModel) = Page {
     var sourceYear by rememberSaveable { mutableStateOf("") }
     var tagsText by rememberSaveable { mutableStateOf("") }
     var analysisExpanded by rememberSaveable { mutableStateOf(false) }
+    var reviewDetailsExpanded by rememberSaveable { mutableStateOf(false) }
+    var understandingExpanded by rememberSaveable { mutableStateOf(false) }
+    var sourceExpanded by rememberSaveable { mutableStateOf(false) }
     var firstAttempt by rememberSaveable { mutableStateOf("") }
     var errorTrigger by rememberSaveable { mutableStateOf("") }
     var errorReason by rememberSaveable { mutableStateOf("concept") }
@@ -744,62 +784,68 @@ private fun AddScreen(model: AppViewModel) = Page {
             MaterialTheme.colorScheme.secondaryContainer) { kind = "memory" }
     } else if (kind == "memory") {
         EditorSection("知识定位", "一张卡只检验一个清晰目标") {
-            ChoiceRow("科目", listOf(
+            DropdownChoice("科目", listOf(
                 "data_structures" to "数据结构", "computer_organization" to "组成原理",
                 "operating_systems" to "操作系统", "computer_networks" to "计算机网络",
             ), subject) { subject = it }
-            ChoiceRow("知识形式", listOf(
+            DropdownChoice("知识形式", listOf(
                 "concept" to "概念辨析", "scale_mapping" to "量纲映射", "formula_rule" to "公式规则",
                 "enumeration" to "枚举", "comparison" to "对比", "process" to "流程",
             ), archetype) { archetype = it }
             OutlinedTextField(knowledgePoint, { knowledgePoint = it }, label = { Text("考点 / 知识点") },
-                placeholder = { Text("例如：吞吐量与响应时间") }, modifier = Modifier.fillMaxWidth())
+                placeholder = { Text("可选，例如：吞吐量与响应时间") }, modifier = Modifier.fillMaxWidth())
         }
-        EditorSection("主动回忆", "先定义要回忆什么，再定义如何判分") {
+        EditorSection("主动回忆", "先写问题和答案，其他内容稍后补充") {
             OutlinedTextField(prompt, { prompt = it }, label = { Text("回忆问题") },
                 placeholder = { Text(archetypePrompt(archetype)) }, modifier = Modifier.fillMaxWidth(), minLines = 2)
             OutlinedTextField(answer, { answer = it }, label = { Text("核心答案") },
                 modifier = Modifier.fillMaxWidth(), minLines = 3)
-            OutlinedTextField(pointsText, { pointsText = it },
-                label = { Text(if (archetype == "scale_mapping") "映射项（每行：名称 | 指数 | 中文量级）" else "评分要点（每行一个）") },
-                supportingText = { Text("复习时逐项勾选，记录命中率，而非只凭感觉打分") },
-                modifier = Modifier.fillMaxWidth(), minLines = 3)
-            OutlinedTextField(hintsText, { hintsText = it }, label = { Text("分层提示（每行一层）") },
-                supportingText = { Text("从方向提示到关键线索，使用层级会写入复习证据") },
-                modifier = Modifier.fillMaxWidth(), minLines = 2)
         }
-        EditorSection("理解与迁移", "这些字段在核对答案后展开") {
-            OutlinedTextField(mechanism, { mechanism = it }, label = { Text("为什么 / 工作机制") },
-                modifier = Modifier.fillMaxWidth(), minLines = 2)
-            OutlinedTextField(conditions, { conditions = it }, label = { Text("适用条件与边界") },
-                modifier = Modifier.fillMaxWidth(), minLines = 2)
-            OutlinedTextField(contrast, { contrast = it }, label = { Text("易混概念与差异") },
-                modifier = Modifier.fillMaxWidth(), minLines = 2)
-            OutlinedTextField(example, { example = it }, label = { Text("最小例子 / 边界例子") },
-                modifier = Modifier.fillMaxWidth(), minLines = 2)
-            OutlinedTextField(commonTrap, { commonTrap = it }, label = { Text("常见误区") },
-                modifier = Modifier.fillMaxWidth(), minLines = 2)
-            OutlinedTextField(transferPrompt, { transferPrompt = it }, label = { Text("迁移问题") },
-                placeholder = { Text("换一个条件后，结论如何变化？") }, modifier = Modifier.fillMaxWidth(), minLines = 2)
-            OutlinedTextField(mnemonic, { mnemonic = it }, label = { Text("记忆钩子（可选）") }, modifier = Modifier.fillMaxWidth())
+        OutlinedButton(onClick = { reviewDetailsExpanded = !reviewDetailsExpanded }, modifier = Modifier.fillMaxWidth().height(48.dp)) {
+            Text(if (reviewDetailsExpanded) "收起评分与提示" else "补充评分要点与分层提示")
+            Spacer(Modifier.width(6.dp)); Icon(Icons.Default.ExpandMore, null, Modifier.size(18.dp))
         }
-        EditorSection("来源与标签", "支持按资料、章节和标签快速回溯") {
-            SourceFields(sourceType, { sourceType = it }, sourceTitle, { sourceTitle = it },
-                sourceChapter, { sourceChapter = it }, sourceLocator, { sourceLocator = it },
-                sourceYear, { sourceYear = it })
-            OutlinedTextField(tagsText, { tagsText = it }, label = { Text("标签（逗号或换行分隔）") },
-                supportingText = { Text("会自动补充 考点/… 与 来源/… 标签") }, modifier = Modifier.fillMaxWidth())
+        AnimatedVisibility(reviewDetailsExpanded) {
+            EditorSection("评分与提示", "复习时逐项核对，记录命中率") {
+                OutlinedTextField(pointsText, { pointsText = it },
+                    label = { Text(if (archetype == "scale_mapping") "映射项（每行：名称 | 指数 | 中文量级）" else "评分要点（每行一个）") },
+                    modifier = Modifier.fillMaxWidth(), minLines = 3)
+                OutlinedTextField(hintsText, { hintsText = it }, label = { Text("分层提示（每行一层）") },
+                    supportingText = { Text("从方向提示到关键线索") }, modifier = Modifier.fillMaxWidth(), minLines = 2)
+            }
         }
-        val enoughPoints = if (archetype in setOf("scale_mapping", "enumeration", "process")) points.size >= 2 else points.isNotEmpty()
-        val memoryReady = knowledgePoint.isNotBlank() && prompt.isNotBlank() &&
-            (answer.isNotBlank() || archetype in setOf("scale_mapping", "enumeration", "process")) && enoughPoints &&
-            (archetype != "formula_rule" || conditions.isNotBlank())
+        OutlinedButton(onClick = { understandingExpanded = !understandingExpanded }, modifier = Modifier.fillMaxWidth().height(48.dp)) {
+            Text(if (understandingExpanded) "收起理解与迁移" else "补充理解与迁移（可选）")
+            Spacer(Modifier.width(6.dp)); Icon(Icons.Default.ExpandMore, null, Modifier.size(18.dp))
+        }
+        AnimatedVisibility(understandingExpanded) {
+            EditorSection("理解与迁移", "核对答案后再补也可以") {
+                OutlinedTextField(mechanism, { mechanism = it }, label = { Text("为什么 / 工作机制") }, modifier = Modifier.fillMaxWidth(), minLines = 2)
+                OutlinedTextField(conditions, { conditions = it }, label = { Text("适用条件与边界") }, modifier = Modifier.fillMaxWidth(), minLines = 2)
+                OutlinedTextField(contrast, { contrast = it }, label = { Text("易混概念与差异") }, modifier = Modifier.fillMaxWidth(), minLines = 2)
+                OutlinedTextField(example, { example = it }, label = { Text("最小例子 / 边界例子") }, modifier = Modifier.fillMaxWidth(), minLines = 2)
+                OutlinedTextField(commonTrap, { commonTrap = it }, label = { Text("常见误区") }, modifier = Modifier.fillMaxWidth(), minLines = 2)
+                OutlinedTextField(transferPrompt, { transferPrompt = it }, label = { Text("迁移问题") }, placeholder = { Text("换一个条件后，结论如何变化？") }, modifier = Modifier.fillMaxWidth(), minLines = 2)
+                OutlinedTextField(mnemonic, { mnemonic = it }, label = { Text("记忆钩子（可选）") }, modifier = Modifier.fillMaxWidth())
+            }
+        }
+        OutlinedButton(onClick = { sourceExpanded = !sourceExpanded }, modifier = Modifier.fillMaxWidth().height(48.dp)) {
+            Text(if (sourceExpanded) "收起来源与标签" else "补充来源与标签（可选）")
+            Spacer(Modifier.width(6.dp)); Icon(Icons.Default.ExpandMore, null, Modifier.size(18.dp))
+        }
+        AnimatedVisibility(sourceExpanded) {
+            EditorSection("来源与标签", "支持按资料、章节和标签快速回溯") {
+                SourceFields(sourceType, { sourceType = it }, sourceTitle, { sourceTitle = it }, sourceChapter, { sourceChapter = it }, sourceLocator, { sourceLocator = it }, sourceYear, { sourceYear = it })
+                TagInput(tagsText, { tagsText = it }, state.availableTags.map(TagRow::name), "会记住已有标签，输入前缀即可补全")
+            }
+        }
+        val memoryReady = prompt.isNotBlank() && answer.isNotBlank()
         Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
             OutlinedButton({ kind = "choice" }, Modifier.height(48.dp)) { Text("返回") }
             Button({
                 val resolvedAnswer = answer.ifBlank { points.joinToString("\n") }
                 model.createMemoryCard(MemoryCardDraft(
-                    templateType = memoryTemplate(archetype, hints), archetype = archetype,
+                    templateType = memoryTemplate(archetype, hints, points), archetype = archetype,
                     subject = subject, knowledgePoint = knowledgePoint, prompt = prompt,
                     answer = resolvedAnswer, hints = hints, answerPoints = points,
                     mechanism = mechanism, conditions = conditions, contrast = contrast,
@@ -820,15 +866,14 @@ private fun AddScreen(model: AppViewModel) = Page {
             SourceFields(sourceType, { sourceType = it }, sourceTitle, { sourceTitle = it },
                 sourceChapter, { sourceChapter = it }, sourceLocator, { sourceLocator = it },
                 sourceYear, { sourceYear = it })
-            OutlinedTextField(tagsText, { tagsText = it }, label = { Text("标签（逗号或换行分隔）") },
-                modifier = Modifier.fillMaxWidth())
+            TagInput(tagsText, { tagsText = it }, state.availableTags.map(TagRow::name), "输入标签，已有标签会自动补全")
             Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
                 OutlinedButton({ gallery.launch("image/*") }, Modifier.height(48.dp)) {
                     Icon(Icons.Default.Image, null, Modifier.size(18.dp)); Spacer(Modifier.width(7.dp)); Text("选择图片")
                 }
                 OutlinedButton({
                     val file = File(context.cacheDir, "capture-${System.currentTimeMillis()}.jpg")
-                    val uri = FileProvider.getUriForFile(context, "${context.packageName}.capture", file)
+                    val uri = Uri.parse("content://${context.packageName}.capture/capture/${file.name}")
                     captureUri = uri.toString(); camera.launch(uri)
                 }, Modifier.height(48.dp)) { Text("拍照") }
             }
@@ -898,7 +943,7 @@ private fun SourceFields(
     locator: String, setLocator: (String) -> Unit,
     year: String, setYear: (String) -> Unit,
 ) {
-    ChoiceRow("来源类型", listOf(
+    DropdownChoice("来源类型", listOf(
         "textbook" to "教材", "course" to "课程", "past_exam" to "真题",
         "practice" to "习题", "notes" to "笔记", "other" to "其他",
     ), sourceType, setSourceType)
@@ -962,6 +1007,13 @@ private fun SettingsScreen(state: AppUiState, model: AppViewModel) {
     ) { uri -> uri?.let(model::restoreBackup) }
     val permission = rememberLauncherForActivityResult(ActivityResultContracts.RequestPermission()) { granted ->
         if (!granted) reminder = false
+    }
+    val installPermission = rememberLauncherForActivityResult(ActivityResultContracts.StartActivityForResult()) {
+        state.downloadedUpdatePath?.let { path ->
+            if (Build.VERSION.SDK_INT < 26 || context.packageManager.canRequestPackageInstalls()) {
+                launchUpdateInstaller(context, path)
+            }
+        }
     }
     LazyColumn(
         modifier = Modifier.fillMaxSize().widthIn(max = 760.dp),
@@ -1069,6 +1121,48 @@ private fun SettingsScreen(state: AppUiState, model: AppViewModel) {
             }
         }
         item {
+            val update = state.availableUpdate
+            val updateSubtitle = when {
+                state.updateInProgress -> "正在处理"
+                state.downloadedUpdatePath != null -> "v${update?.version} 已下载"
+                update != null -> "发现 v${update.version}"
+                else -> "当前版本 v${BuildConfig.VERSION_NAME}"
+            }
+            SettingsSection("应用更新", updateSubtitle, Icons.Default.SystemUpdateAlt) {
+                Text("当前版本 v${BuildConfig.VERSION_NAME}", color = MaterialTheme.colorScheme.onSurfaceVariant)
+                Button(
+                    onClick = {
+                        when {
+                            state.downloadedUpdatePath != null -> {
+                                if (Build.VERSION.SDK_INT >= 26 && !context.packageManager.canRequestPackageInstalls()) {
+                                    installPermission.launch(Intent(
+                                        Settings.ACTION_MANAGE_UNKNOWN_APP_SOURCES,
+                                        Uri.parse("package:${context.packageName}"),
+                                    ))
+                                } else launchUpdateInstaller(context, state.downloadedUpdatePath)
+                            }
+                            update != null -> model.downloadUpdate()
+                            else -> model.checkForUpdates()
+                        }
+                    },
+                    modifier = Modifier.fillMaxWidth().height(50.dp),
+                    enabled = !state.updateInProgress,
+                ) {
+                    Icon(
+                        if (state.downloadedUpdatePath == null) Icons.Default.Download else Icons.Default.SystemUpdateAlt,
+                        null, Modifier.size(18.dp),
+                    )
+                    Spacer(Modifier.width(8.dp))
+                    Text(when {
+                        state.updateInProgress -> "处理中"
+                        state.downloadedUpdatePath != null -> "安装 v${update?.version}"
+                        update != null -> "下载 v${update.version}"
+                        else -> "检查更新"
+                    })
+                }
+            }
+        }
+        item {
             SettingsSection("提醒", if (reminder) "每天 $time，仅在有任务时" else "当前已关闭", Icons.Default.Notifications) {
                 Row(verticalAlignment = Alignment.CenterVertically, modifier = Modifier.fillMaxWidth().height(52.dp)) {
                     Column(Modifier.weight(1f)) {
@@ -1138,6 +1232,19 @@ private fun SettingsScreen(state: AppUiState, model: AppViewModel) {
     }
 }
 
+private fun launchUpdateInstaller(context: android.content.Context, path: String) {
+    val directory = File(context.cacheDir, "updates")
+    val file = File(path)
+    require(file.canonicalPath.startsWith(directory.canonicalPath + File.separator) && file.isFile) {
+        "安装包不存在"
+    }
+    val uri = Uri.parse("content://${context.packageName}.capture/updates/${file.name}")
+    context.startActivity(Intent(Intent.ACTION_VIEW).apply {
+        setDataAndType(uri, "application/vnd.android.package-archive")
+        addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION or Intent.FLAG_ACTIVITY_NEW_TASK)
+    })
+}
+
 @Composable
 private fun SettingsSection(
     title: String,
@@ -1177,11 +1284,56 @@ private fun SettingsSection(
 
 @Composable
 private fun ChoiceRow(title: String, choices: List<Pair<String, String>>, selected: String, choose: (String) -> Unit) {
+    DropdownChoice(title, choices, selected, choose)
+}
+
+@Composable
+private fun DropdownChoice(title: String, choices: List<Pair<String, String>>, selected: String, choose: (String) -> Unit) {
+    var expanded by rememberSaveable(title) { mutableStateOf(false) }
+    val selectedLabel = choices.firstOrNull { it.first == selected }?.second ?: selected
     Column(verticalArrangement = Arrangement.spacedBy(7.dp)) {
         Text(title, style = MaterialTheme.typography.titleMedium)
-        Row(Modifier.fillMaxWidth().horizontalScroll(rememberScrollState()), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-            choices.forEach { (value, label) ->
-                FilterChip(selected = selected == value, onClick = { choose(value) }, label = { Text(label) })
+        Box {
+            OutlinedButton(onClick = { expanded = true }, modifier = Modifier.fillMaxWidth().height(50.dp)) {
+                Text(selectedLabel, Modifier.weight(1f))
+                Icon(Icons.Default.ExpandMore, contentDescription = "展开选项")
+            }
+            DropdownMenu(expanded = expanded, onDismissRequest = { expanded = false }, modifier = Modifier.fillMaxWidth(.82f)) {
+                choices.forEach { (value, label) ->
+                    DropdownMenuItem(text = { Text(label) }, onClick = { choose(value); expanded = false })
+                }
+            }
+        }
+    }
+}
+
+@Composable
+private fun TagInput(value: String, onValueChange: (String) -> Unit, knownTags: List<String>, supportingText: String) {
+    val token = value.takeLastWhile { it != ',' && it != '\n' }
+    val currentToken = token.trimStart()
+    val suggestions = if (currentToken.isBlank()) emptyList() else knownTags
+        .filter { it.startsWith(currentToken, ignoreCase = true) && !it.equals(currentToken, ignoreCase = true) }
+        .distinct().take(8)
+    var dismissedForValue by remember { mutableStateOf<String?>(null) }
+    Box {
+        OutlinedTextField(
+            value, { next -> dismissedForValue = null; onValueChange(next) },
+            label = { Text("标签（逗号或换行分隔）") },
+            supportingText = { Text(supportingText) },
+            modifier = Modifier.fillMaxWidth(),
+        )
+        DropdownMenu(
+            expanded = suggestions.isNotEmpty() && dismissedForValue != value,
+            onDismissRequest = { dismissedForValue = value },
+        ) {
+            suggestions.forEach { suggestion ->
+                DropdownMenuItem(
+                    text = { Text("#$suggestion") },
+                    onClick = {
+                        onValueChange(value.dropLast(token.length) + suggestion + ", ")
+                        dismissedForValue = null
+                    },
+                )
             }
         }
     }
@@ -1577,9 +1729,9 @@ private fun reviewAnswer(row: StudyRow): String = when (row.templateType) {
 private fun splitEditorLines(value: String): List<String> = value.lineSequence()
     .map(String::trim).filter(String::isNotEmpty).distinct().toList()
 
-private fun memoryTemplate(archetype: String, hints: List<String>): String = when (archetype) {
+private fun memoryTemplate(archetype: String, hints: List<String>, points: List<String>): String = when (archetype) {
     "comparison" -> "comparison"
-    "enumeration", "process", "scale_mapping" -> "enumeration"
+    "enumeration", "process", "scale_mapping" -> if (points.size >= 2) "enumeration" else "qa"
     "cloze" -> "cloze"
     else -> if (hints.isEmpty()) "qa" else "layered_hint"
 }

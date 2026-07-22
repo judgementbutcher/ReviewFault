@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.20)
-project(ReviewFaultCore VERSION 0.6.0 LANGUAGES CXX)
+project(ReviewFaultCore VERSION 0.6.1 LANGUAGES CXX)
 
 add_library(reviewfault_core
   core/src/domain.cpp

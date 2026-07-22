@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import { readFileSync, readdirSync } from 'node:fs';
 
-const version = '0.6.0';
+const version = '0.6.1';
 const read = (relative) => readFileSync(new URL(relative, import.meta.url), 'utf8');
 
 const contracts = [
@@ -21,9 +21,9 @@ const contracts = [
 for (const [name, path, token] of contracts) {
   assert(read(path).includes(token), `${name} is not synchronized to ${version}`);
 }
-assert(read('../../apps/android/app/build.gradle.kts').includes('versionCode = 11') &&
-  read('../../apps/harmony/AppScope/app.json5').includes('"versionCode": 11'),
-  'mobile version codes must advance together for v0.6.0');
+assert(read('../../apps/android/app/build.gradle.kts').includes('versionCode = 12') &&
+  read('../../apps/harmony/AppScope/app.json5').includes('"versionCode": 12'),
+  'mobile version codes must advance together for v0.6.1');
 
 for (const repository of ['../../apps/windows/ReviewFault/Data/AppRepository.cs']) {
   assert(read(repository).includes(version), `${repository} backup metadata is stale`);

@@ -1080,6 +1080,30 @@ class AppDatabase private constructor(context: Context) :
         }
     }
 
+    fun nextUnlearned(): StudyRow? = readableDatabase.rawQuery(
+        """
+        SELECT $STUDY_ROW_COLUMNS
+        FROM study_item s
+        LEFT JOIN memory_card m ON m.study_item_id = s.id
+        LEFT JOIN math_problem p ON p.study_item_id = s.id
+        LEFT JOIN card_profile_v5 cp ON cp.study_item_id = s.id
+        LEFT JOIN math_problem_media pm
+          ON pm.math_problem_id = s.id AND pm.role = 'prompt' AND pm.sort_order = 0
+        LEFT JOIN media ON media.id = pm.media_id
+        CROSS JOIN learning_preferences lp
+        WHERE s.suspended_at IS NULL AND s.deleted_at IS NULL AND s.scheduler_state = 0
+          AND lp.singleton = 1
+          AND ((s.kind = 'math_problem' AND lp.include_math_problems = 1) OR
+            (s.kind = 'memory_card' AND lp.include_memory_cards = 1 AND (
+              (s.subject = 'data_structures' AND lp.enable_data_structures = 1) OR
+              (s.subject = 'computer_organization' AND lp.enable_computer_organization = 1) OR
+              (s.subject = 'operating_systems' AND lp.enable_operating_systems = 1) OR
+              (s.subject = 'computer_networks' AND lp.enable_computer_networks = 1))))
+        ORDER BY s.created_at, s.id
+        LIMIT 1
+        """.trimIndent(), null,
+    ).use { cursor -> if (cursor.moveToFirst()) cursor.toStudyRow() else null }
+
     fun search(query: String): List<StudyRow> = search(LibraryFilter(query = query, limit = 100))
 
     fun search(filter: LibraryFilter): List<StudyRow> {
@@ -1561,17 +1585,8 @@ class AppDatabase private constructor(context: Context) :
             }
             "enumeration" -> require(draft.answerPoints.size >= 2) { "枚举卡至少需要两个评分要点" }
         }
-        when (draft.archetype) {
-            "comparison" -> require(draft.contrast.isNotBlank() || draft.answer.isNotBlank()) {
-                "对比卡需要明确差异维度"
-            }
-            "process", "enumeration", "scale_mapping" -> require(draft.answerPoints.size >= 2) {
-                "该知识形式至少需要两个可核对要点"
-            }
-            "formula_rule" -> require(draft.answer.isNotBlank() && draft.conditions.isNotBlank()) {
-                "公式卡需要公式和适用条件"
-            }
-        }
+        // The first save is intentionally lightweight. Optional scoring points,
+        // conditions, and transfer notes can be added as the card matures.
     }
 
     private fun validateMathDraft(draft: MathErrorDraft) {
