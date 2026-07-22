@@ -66,7 +66,7 @@ object NativeScheduler {
         }
     }
 
-    private const val EXPECTED_ABI_VERSION = 4
+    private const val EXPECTED_ABI_VERSION = 5
 
     external fun nativeAbiVersion(): Int
 

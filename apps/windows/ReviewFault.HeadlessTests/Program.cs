@@ -91,7 +91,7 @@ try
     await repository.SaveLearningPreferencesAsync(preferences with {
         DailyNewMemoryLimit = 12, MathIntensity = "intensive" });
     Require((await repository.GetLearningPreferencesAsync()).DailyNewMemoryLimit == 12,
-        "learning settings persist through schema v4");
+        "learning settings persist through schema v5");
     await repository.SaveLearningPreferencesAsync((await repository.GetLearningPreferencesAsync()) with {
         SchedulerGeneration = 2 });
     var v2Row = (await repository.SearchAsync("TCP")).Single(item => item.Id == enumerationId);
@@ -209,8 +209,20 @@ try
         Require(Convert.ToInt32(await command.ExecuteScalarAsync()) == 1,
             "rollout rollback appends a v2 event without rewriting v3 history");
         command.CommandText = "PRAGMA user_version";
+        Require(Convert.ToInt32(await command.ExecuteScalarAsync()) == 5,
+            "repository initializes schema v5");
+        command.CommandText = "SELECT COUNT(*) FROM learning_task_v5";
         Require(Convert.ToInt32(await command.ExecuteScalarAsync()) == 4,
-            "repository initializes schema v4");
+            "migration and new package creation both materialize v5 learning tasks");
+        command.CommandText = "SELECT COUNT(*) FROM learning_evidence_v5";
+        Require(Convert.ToInt32(await command.ExecuteScalarAsync()) == 3,
+            "each local review appends immutable v5 learning evidence");
+        command.CommandText = """
+            SELECT COUNT(*) FROM learning_evidence_v5 e
+            JOIN sync_outbox o ON o.entity_type = 'learningEvidence' AND o.entity_id = e.evidence_id
+            """;
+        Require(Convert.ToInt32(await command.ExecuteScalarAsync()) == 3,
+            "v5 evidence is exported as an independent sync fact");
         command.CommandText = "SELECT COUNT(*) FROM review_action_v4";
         Require(Convert.ToInt32(await command.ExecuteScalarAsync()) == 4,
             "local and pulled reviews append canonical v4 facts");

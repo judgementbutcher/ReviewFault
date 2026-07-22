@@ -28,7 +28,7 @@ function androidMigrationStatements(script) {
     }
     if (/^CREATE TRIGGER/i.test(line)) inTrigger = true;
     current += `${rawLine}\n`;
-    const complete = inTrigger ? /^END;$/i.test(line) : line.endsWith(';');
+    const complete = inTrigger ? /END;$/i.test(line) : line.endsWith(';');
     if (complete) {
       statements.push(current.trim().replace(/;$/, ''));
       current = '';

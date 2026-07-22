@@ -173,6 +173,45 @@ internal struct MathResultV3Native
 }
 
 [StructLayout(LayoutKind.Sequential)]
+internal struct MemoryTaskInputV5Native
+{
+    public uint StructSize; public MemoryStateV2Native State; public int Preset; public long ReviewedAt;
+    public uint PointHits, PointCount, HintLevel; public int AnswerRevealed, DurationReliable;
+    public uint DurationSeconds, Confidence, HistoryEventCount; public double CalibrationImprovement;
+    public uint ConsecutiveLapses;
+}
+
+[StructLayout(LayoutKind.Sequential)]
+internal struct MemoryTaskResultV5Native
+{
+    public uint StructSize; public MemoryResultV3Native Review; public int EffectiveRating;
+    public double PointCoverage; public int RatingCappedByHelp;
+}
+
+[StructLayout(LayoutKind.Sequential)]
+internal struct MathTaskStateV5Native
+{
+    public uint StructSize; public int Phase; public long DueAt, LastReviewedAt;
+    public uint Repetitions, ConsecutiveFailures;
+    public int OriginalVerified, VariantVerified, TransferVerified, SpeedVerified;
+}
+
+[StructLayout(LayoutKind.Sequential)]
+internal struct MathTaskInputV5Native
+{
+    public uint StructSize; public MathTaskStateV5Native State; public long ReviewedAt;
+    public int Correct, HintRevealed, SpeedTargetMet, VariantAvailable;
+    public uint ErrorMask, DurationSeconds, Confidence;
+}
+
+[StructLayout(LayoutKind.Sequential)]
+internal struct MathTaskResultV5Native
+{
+    public uint StructSize; public MathTaskStateV5Native State;
+    public int PhaseBefore, Advanced, Regressed; public uint RepairMask;
+}
+
+[StructLayout(LayoutKind.Sequential)]
 internal struct ReviewActionV4Native
 {
     public uint StructSize;
@@ -214,11 +253,16 @@ public sealed record MathScheduleResult(
 public sealed record ReplayAction(
     string ActionId, string DeviceId, ulong DeviceCounter, ulong CausalCursor,
     int Feedback, long ReviewedAt);
+public sealed record MathTaskStateV5(
+    int Phase, long DueAt, long LastReviewedAt, uint Repetitions, uint ConsecutiveFailures,
+    bool OriginalVerified, bool VariantVerified, bool TransferVerified, bool SpeedVerified);
+public sealed record MathTaskReviewV5(MathTaskStateV5 State, int PhaseBefore,
+    bool Advanced, bool Regressed, uint RepairMask);
 
 public static class NativeScheduler
 {
     private const string Library = "reviewfault_core";
-    private const uint ExpectedAbiVersion = 4;
+    private const uint ExpectedAbiVersion = 5;
 
     [DllImport(Library, CallingConvention = CallingConvention.Cdecl)]
     private static extern uint rf_scheduler_abi_version();
@@ -273,6 +317,16 @@ public static class NativeScheduler
     private static extern int review_math_v3(in MathStateV2Native state,
         in MathInputV3Native input, ref MathResultV3Native result,
         StringBuilder errorBuffer, nuint errorBufferSize);
+    [DllImport(Library, CallingConvention = CallingConvention.Cdecl)]
+    private static extern nuint rf_memory_task_review_result_v5_size();
+    [DllImport(Library, CallingConvention = CallingConvention.Cdecl)]
+    private static extern nuint rf_math_task_review_result_v5_size();
+    [DllImport(Library, CallingConvention = CallingConvention.Cdecl, CharSet = CharSet.Ansi)]
+    private static extern int review_memory_task_v5(in MemoryTaskInputV5Native input,
+        ref MemoryTaskResultV5Native result, StringBuilder errorBuffer, nuint errorBufferSize);
+    [DllImport(Library, CallingConvention = CallingConvention.Cdecl, CharSet = CharSet.Ansi)]
+    private static extern int review_math_task_v5(in MathTaskInputV5Native input,
+        ref MathTaskResultV5Native result, StringBuilder errorBuffer, nuint errorBufferSize);
 
     [DllImport(Library, CallingConvention = CallingConvention.Cdecl, CharSet = CharSet.Ansi)]
     private static extern int rf_review(
@@ -302,6 +356,9 @@ public static class NativeScheduler
             rf_math_review_result_v3_size() != (nuint)Marshal.SizeOf<MathResultV3Native>() ||
             rf_review_action_v4_size() != (nuint)Marshal.SizeOf<ReviewActionV4Native>())
             throw new InvalidOperationException("调度器 ABI v4 结构不匹配，请重新安装应用。");
+        if (rf_memory_task_review_result_v5_size() != (nuint)Marshal.SizeOf<MemoryTaskResultV5Native>() ||
+            rf_math_task_review_result_v5_size() != (nuint)Marshal.SizeOf<MathTaskResultV5Native>())
+            throw new InvalidOperationException("调度器 ABI v5 结构不匹配，请重新安装应用。");
     }
 
     public static int[] CanonicalOrderV4(IReadOnlyList<ReplayAction> actions)
@@ -465,6 +522,66 @@ public static class NativeScheduler
             result.Event.ScheduledDays, result.Event.AppliedFeedback,
             result.Event.AlgorithmVersion, result.Event.ParameterVersion,
             result.Event.DecisionFlags);
+    }
+
+    public static ScheduleResult ReviewMemoryTaskV5(
+        ScheduleCard card, int preset, long reviewedAt, uint pointHits, uint pointCount,
+        uint hintLevel, bool answerRevealed, bool durationReliable, uint durationSeconds,
+        uint confidence, uint historyEventCount, double calibrationImprovement,
+        uint consecutiveLapses)
+    {
+        ValidateAbi();
+        var input = new MemoryTaskInputV5Native {
+            StructSize = (uint)Marshal.SizeOf<MemoryTaskInputV5Native>(),
+            State = new MemoryStateV2Native { StructSize = (uint)Marshal.SizeOf<MemoryStateV2Native>(),
+                State = (int)card.State, Difficulty = card.Difficulty, StabilityDays = card.StabilityDays,
+                DueAt = card.DueAt, LastReviewedAt = card.LastReviewedAt, Repetitions = card.Repetitions,
+                Lapses = card.Lapses },
+            Preset = preset, ReviewedAt = reviewedAt, PointHits = pointHits, PointCount = pointCount,
+            HintLevel = hintLevel, AnswerRevealed = answerRevealed ? 1 : 0,
+            DurationReliable = durationReliable ? 1 : 0, DurationSeconds = durationSeconds,
+            Confidence = confidence, HistoryEventCount = historyEventCount,
+            CalibrationImprovement = calibrationImprovement, ConsecutiveLapses = consecutiveLapses,
+        };
+        var result = new MemoryTaskResultV5Native { StructSize = (uint)Marshal.SizeOf<MemoryTaskResultV5Native>() };
+        var error = new StringBuilder(256);
+        var status = review_memory_task_v5(in input, ref result, error, (nuint)error.Capacity);
+        if (status != 0) throw new ArgumentException(error.ToString());
+        return new ScheduleResult(new ScheduleCard((CardState)result.Review.State.State,
+            result.Review.State.Difficulty, result.Review.State.StabilityDays, result.Review.State.DueAt,
+            result.Review.State.LastReviewedAt, result.Review.State.Repetitions, result.Review.State.Lapses),
+            result.Review.Event.ElapsedDays, result.Review.Event.ScheduledDays,
+            result.Review.Event.RetrievabilityBefore, result.Review.Event.AlgorithmVersion,
+            result.Review.Event.ParameterVersion, result.Review.Event.DecisionFlags,
+            result.Review.Event.TargetRetention, result.Review.Event.Personalized != 0,
+            result.Review.Event.LearningStep != 0, result.Review.Event.OverdueDays);
+    }
+
+    public static MathTaskReviewV5 ReviewMathTaskV5(MathTaskStateV5 state, long reviewedAt,
+        bool correct, bool hintRevealed, bool speedTargetMet, bool variantAvailable,
+        uint errorMask, uint durationSeconds, uint confidence)
+    {
+        ValidateAbi();
+        var input = new MathTaskInputV5Native {
+            StructSize = (uint)Marshal.SizeOf<MathTaskInputV5Native>(),
+            State = new MathTaskStateV5Native { StructSize = (uint)Marshal.SizeOf<MathTaskStateV5Native>(),
+                Phase = state.Phase, DueAt = state.DueAt, LastReviewedAt = state.LastReviewedAt,
+                Repetitions = state.Repetitions, ConsecutiveFailures = state.ConsecutiveFailures,
+                OriginalVerified = state.OriginalVerified ? 1 : 0, VariantVerified = state.VariantVerified ? 1 : 0,
+                TransferVerified = state.TransferVerified ? 1 : 0, SpeedVerified = state.SpeedVerified ? 1 : 0 },
+            ReviewedAt = reviewedAt, Correct = correct ? 1 : 0, HintRevealed = hintRevealed ? 1 : 0,
+            SpeedTargetMet = speedTargetMet ? 1 : 0, VariantAvailable = variantAvailable ? 1 : 0,
+            ErrorMask = errorMask, DurationSeconds = durationSeconds, Confidence = confidence,
+        };
+        var result = new MathTaskResultV5Native { StructSize = (uint)Marshal.SizeOf<MathTaskResultV5Native>() };
+        var error = new StringBuilder(256);
+        var status = review_math_task_v5(in input, ref result, error, (nuint)error.Capacity);
+        if (status != 0) throw new ArgumentException(error.ToString());
+        var next = result.State;
+        return new MathTaskReviewV5(new MathTaskStateV5(next.Phase, next.DueAt, next.LastReviewedAt,
+            next.Repetitions, next.ConsecutiveFailures, next.OriginalVerified != 0,
+            next.VariantVerified != 0, next.TransferVerified != 0, next.SpeedVerified != 0),
+            result.PhaseBefore, result.Advanced != 0, result.Regressed != 0, result.RepairMask);
     }
 
     private static ScheduleCard ToManaged(CardNative card) => new(

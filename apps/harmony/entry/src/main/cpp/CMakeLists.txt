@@ -8,6 +8,7 @@ add_library(reviewfault SHARED
   ${RF_ROOT}/core/src/scheduler_v2.cpp
   ${RF_ROOT}/core/src/scheduler_v3.cpp
   ${RF_ROOT}/core/src/scheduler_v4.cpp
+  ${RF_ROOT}/core/src/scheduler_v5.cpp
   ${RF_ROOT}/core/src/reviewfault_c.cpp)
 target_include_directories(reviewfault PRIVATE ${RF_ROOT}/core/include)
 target_compile_features(reviewfault PRIVATE cxx_std_20)

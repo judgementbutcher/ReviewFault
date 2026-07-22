@@ -240,6 +240,9 @@ public sealed class MainWindow : Window
             await (reminderService?.CheckAsync() ?? Task.CompletedTask);
             await MessageAsync("设置已保存；只影响此后的作答。");
         }));
+        panel.Children.Add(Heading("应用更新", 20));
+        panel.Children.Add(Body("检查 GitHub Releases 中的稳定版本；下载页会在浏览器中打开。"));
+        panel.Children.Add(ActionButton("检查更新", CheckForUpdatesAsync));
         panel.Children.Add(Heading("数据", 20));
         panel.Children.Add(Heading("账号与同步", 20));
         var endpoint = new TextBox { Header = "同步服务地址", Text = viewModel.SyncEndpoint };
@@ -284,6 +287,33 @@ public sealed class MainWindow : Window
         SetPage(panel);
     }
 
+    private async Task CheckForUpdatesAsync()
+    {
+        try
+        {
+            var result = await new UpdateService().CheckAsync("0.6.0");
+            if (!result.IsAvailable)
+            {
+                await MessageAsync($"当前已是最新版本（v{result.CurrentVersion}）。");
+                return;
+            }
+            var dialog = new ContentDialog
+            {
+                XamlRoot = Root.XamlRoot,
+                Title = $"发现 v{result.LatestVersion}",
+                Content = "新版本将在 GitHub Releases 页面下载。关闭应用后运行安装包即可升级，现有学习数据会保留。",
+                PrimaryButtonText = "打开下载页",
+                CloseButtonText = "稍后",
+            };
+            if (await dialog.ShowAsync() == ContentDialogResult.Primary)
+                await Windows.System.Launcher.LaunchUriAsync(result.ReleasePage);
+        }
+        catch (Exception error) when (error is HttpRequestException or TaskCanceledException or JsonException or InvalidDataException)
+        {
+            await MessageAsync("暂时无法检查更新，请确认网络后重试。");
+        }
+    }
+
     private async Task ShowTrashAsync()
     {
         var rows = await viewModel.Repository.TrashAsync();
@@ -318,12 +348,18 @@ public sealed class MainWindow : Window
         }
         var startedAt = DateTimeOffset.UtcNow.ToUnixTimeSeconds();
         var panel = PagePanel();
-        panel.Children.Add(Body(row.Kind == "math_problem" ? "数学 · 重做" : "408 · 主动回忆"));
+        panel.Children.Add(Body(row.Kind == "math_problem"
+            ? $"数学 · {Fallback(row.Profile.KnowledgePoint, "重做")}"
+            : $"408 · {Fallback(row.Profile.KnowledgePoint, ArchetypeLabel(row.Profile.Archetype))}"));
         panel.Children.Add(Body(
             $"本轮已完成 {reviewSessionReviewed} 条 · 跳过 {reviewSessionSkippedItemIds.Count} 条 · " +
             $"已用约 {(reviewSessionElapsedSeconds + 59) / 60} 分钟"));
         panel.Children.Add(Heading(
             row.Kind == "math_problem" ? "先独立完成，再看答案" : "先在脑中或纸上作答", 28));
+        var sourceLine = string.Join(" · ", new[] {
+            row.Profile.SourceTitle, row.Profile.SourceChapter, row.Profile.SourceLocator,
+        }.Where(value => !string.IsNullOrWhiteSpace(value)));
+        if (!string.IsNullOrWhiteSpace(sourceLine)) panel.Children.Add(Body(sourceLine));
         if (!string.IsNullOrWhiteSpace(row.Prompt)) panel.Children.Add(Card(Body(ReviewPrompt(row))));
         foreach (var mediaPath in await viewModel.Repository.MediaPathsAsync(row.Id))
         {
@@ -346,10 +382,23 @@ public sealed class MainWindow : Window
                 await viewModel.Repository.SaveInkDraftAsync(row.Id, document);
             panel.Children.Add(inkPad);
         }
-        var hints = StructuredItems(row);
-        if (row.TemplateType == "layered_hint" && hints.Count > 0)
+        var recallDraft = new TextBox
         {
-            var shownHints = 0;
+            Header = "回忆草稿", AcceptsReturn = true, TextWrapping = TextWrapping.Wrap,
+            PlaceholderText = "写关键词即可；会和本次复盘一同保存",
+            Visibility = row.Kind == "memory_card" ? Visibility.Visible : Visibility.Collapsed,
+        };
+        panel.Children.Add(recallDraft);
+        var confidence = new ComboBox
+        {
+            Header = "作答前信心", ItemsSource = new[] { "1 · 很低", "2 · 较低", "3 · 一般", "4 · 较高", "5 · 很高" },
+            SelectedIndex = 2,
+        };
+        panel.Children.Add(confidence);
+        var hints = StructuredItems(row);
+        var shownHints = 0;
+        if (hints.Count > 0)
+        {
             var hintPanel = new StackPanel { Spacing = 6 };
             var hintButton = ActionButton("显示一层提示", () =>
             {
@@ -361,21 +410,63 @@ public sealed class MainWindow : Window
             panel.Children.Add(hintButton);
         }
         var answerPanel = new StackPanel { Spacing = 12, Visibility = Visibility.Collapsed };
-        var reveal = ActionButton("显示答案 / 提交作答", () =>
+        var responseCommitted = false;
+        var directReveal = false;
+        var reveal = ActionButton(row.Kind == "math_problem" ? "完成作答并核对" : "锁定回忆并核对", () =>
         {
+            responseCommitted = true;
             answerPanel.Visibility = Visibility.Visible;
             return Task.CompletedTask;
         });
         panel.Children.Add(reveal);
+        panel.Children.Add(ActionButton("暂时想不起来，直接看答案", () =>
+        {
+            directReveal = true;
+            answerPanel.Visibility = Visibility.Visible;
+            return Task.CompletedTask;
+        }));
         answerPanel.Children.Add(Card(
             Body("参考答案"),
             Body(string.IsNullOrWhiteSpace(ReviewAnswer(row)) ? "尚未填写解答；仍可按实际结果评分。" : ReviewAnswer(row))));
+        foreach (var (label, value) in ReviewAnalysis(row).Where(field => !string.IsNullOrWhiteSpace(field.Value)))
+        {
+            answerPanel.Children.Add(Heading(label, 15));
+            answerPanel.Children.Add(Body(value));
+        }
+        var answerPoints = JsonItems(row.AnswerPointsJson);
+        var pointChecks = new List<CheckBox>();
+        if (answerPoints.Count > 0)
+        {
+            answerPanel.Children.Add(Heading("逐项核对", 19));
+            foreach (var point in answerPoints)
+            {
+                var check = new CheckBox { Content = point };
+                pointChecks.Add(check);
+                answerPanel.Children.Add(check);
+            }
+        }
+        var reflection = new TextBox
+        {
+            Header = "本次复盘（可选）", AcceptsReturn = true, TextWrapping = TextWrapping.Wrap,
+            PlaceholderText = "漏掉了什么？下次先想起什么？",
+        };
+        answerPanel.Children.Add(reflection);
+        var reason = new ComboBox
+        {
+            Header = "做错时的主要原因",
+            ItemsSource = new[] { "概念", "思路", "计算", "审题", "结论遗忘", "超时", "其他" },
+            SelectedIndex = 0,
+            Visibility = row.Kind == "math_problem" ? Visibility.Visible : Visibility.Collapsed,
+        };
+        answerPanel.Children.Add(reason);
         answerPanel.Children.Add(Heading("这次完成得怎样？", 19));
         var ratings = new StackPanel { Orientation = Orientation.Horizontal, Spacing = 8 };
         (string Label, Rating Rating, string? MathResult)[] actions = row.Kind == "math_problem"
             ? new[] {
                 ("不会", Rating.Again, (string?)"again"), ("做错", Rating.Again, (string?)"wrong"),
                 ("勉强做对", Rating.Hard, (string?)"effortful"), ("熟练", Rating.Easy, (string?)"fluent") }
+            : answerPoints.Count > 0
+                ? new[] { ("按要点提交", Rating.Good, (string?)null) }
             : new[] {
                 ("忘记", Rating.Again, (string?)null), ("困难", Rating.Hard, null),
                 ("正确", Rating.Good, null), ("轻松", Rating.Easy, null) };
@@ -386,8 +477,25 @@ public sealed class MainWindow : Window
                 var reviewedAt = DateTimeOffset.UtcNow.ToUnixTimeSeconds();
                 if (inkPad?.HasInk == true)
                     await viewModel.Repository.SaveInkDraftAsync(row.Id, inkPad.Snapshot());
+                var hits = pointChecks.Count(check => check.IsChecked == true);
+                var evidenceRating = answerPoints.Count == 0 ? rating : MemoryEvidenceRating(
+                    hits, answerPoints.Count, shownHints, directReveal || !responseCommitted,
+                    confidence.SelectedIndex + 1);
+                if (answerPoints.Count == 0 && (shownHints > 0 || directReveal) && (int)evidenceRating > (int)Rating.Hard)
+                    evidenceRating = Rating.Hard;
+                var reasons = new[] { "concept", "approach", "calculation", "misread", "forgotten_fact", "timeout", "other" };
+                var evidenceReflection = string.Join("\n\n", new[] {
+                    string.IsNullOrWhiteSpace(recallDraft.Text) ? "" : "回忆草稿：" + recallDraft.Text.Trim(),
+                    string.IsNullOrWhiteSpace(reflection.Text) ? "" : "复盘：" + reflection.Text.Trim(),
+                }.Where(value => value.Length > 0));
                 var result = await viewModel.Repository.ReviewAsync(
-                    row, rating, reviewedAt, checked((int)(reviewedAt - startedAt)), mathResult);
+                    row, evidenceRating, reviewedAt, checked((int)(reviewedAt - startedAt)), mathResult,
+                    errorReason: mathResult == "wrong" ? reasons[reason.SelectedIndex] : null,
+                    hintRevealed: shownHints > 0 || directReveal, hintLevel: shownHints,
+                    answerRevealed: directReveal || !responseCommitted,
+                    pointHits: answerPoints.Count == 0 ? null : hits,
+                    pointCount: answerPoints.Count == 0 ? null : answerPoints.Count,
+                    confidence: confidence.SelectedIndex + 1, reflection: evidenceReflection);
                 await viewModel.SyncNowAsync();
                 reviewSessionElapsedSeconds += checked((int)(reviewedAt - startedAt));
                 reviewSessionReviewed++;
@@ -441,10 +549,10 @@ public sealed class MainWindow : Window
 
     private async Task ShowMemoryEditorAsync()
     {
-        var template = new ComboBox
+        var archetype = new ComboBox
         {
-            Header = "模板",
-            ItemsSource = new[] { "问答", "填空", "分层提示", "枚举", "对比" },
+            Header = "知识形式",
+            ItemsSource = new[] { "概念辨析", "量纲映射", "公式规则", "枚举", "对比", "流程" },
             SelectedIndex = 0,
         };
         var subject = new ComboBox
@@ -453,37 +561,95 @@ public sealed class MainWindow : Window
             ItemsSource = new[] { "数据结构", "计算机组成原理", "操作系统", "计算机网络" },
             SelectedIndex = 0,
         };
-        var prompt = new TextBox { Header = "问题 / 填空题干", AcceptsReturn = true };
-        var answer = new TextBox { Header = "答案", AcceptsReturn = true };
-        var structured = new TextBox { Header = "提示或枚举要点（每行一条）", AcceptsReturn = true };
+        var knowledge = new TextBox { Header = "考点 / 知识点", PlaceholderText = "例如：吞吐量与响应时间" };
+        var prompt = new TextBox { Header = "回忆问题", AcceptsReturn = true, TextWrapping = TextWrapping.Wrap };
+        var answer = new TextBox { Header = "核心答案", AcceptsReturn = true, TextWrapping = TextWrapping.Wrap };
+        var points = new TextBox { Header = "评分要点（每行一个；量纲用 名称 | 指数 | 中文量级）", AcceptsReturn = true };
+        var hints = new TextBox { Header = "分层提示（每行一层）", AcceptsReturn = true };
+        var mechanism = new TextBox { Header = "为什么 / 工作机制", AcceptsReturn = true };
+        var conditions = new TextBox { Header = "适用条件与边界", AcceptsReturn = true };
+        var contrast = new TextBox { Header = "易混概念与差异", AcceptsReturn = true };
+        var example = new TextBox { Header = "最小例子 / 边界例子", AcceptsReturn = true };
+        var commonTrap = new TextBox { Header = "常见误区", AcceptsReturn = true };
+        var transfer = new TextBox { Header = "迁移问题", AcceptsReturn = true };
+        var mnemonic = new TextBox { Header = "记忆钩子（可选）" };
+        var sourceType = new ComboBox
+        {
+            Header = "来源类型", ItemsSource = new[] { "教材", "课程", "真题", "习题", "笔记", "其他" },
+            SelectedIndex = 4,
+        };
+        var sourceTitle = new TextBox { Header = "资料名称" };
+        var sourceChapter = new TextBox { Header = "章节" };
+        var sourceLocator = new TextBox { Header = "页码 / 题号" };
+        var sourceYear = new TextBox { Header = "年份（可选）" };
+        var tags = new TextBox { Header = "标签（逗号或换行分隔）" };
         var content = new StackPanel { Spacing = 10 };
         content.Children.Add(subject);
-        content.Children.Add(template);
+        content.Children.Add(archetype);
+        content.Children.Add(knowledge);
         content.Children.Add(prompt);
         content.Children.Add(answer);
-        content.Children.Add(structured);
+        content.Children.Add(points);
+        content.Children.Add(hints);
+        content.Children.Add(mechanism);
+        content.Children.Add(conditions);
+        content.Children.Add(contrast);
+        content.Children.Add(example);
+        content.Children.Add(commonTrap);
+        content.Children.Add(transfer);
+        content.Children.Add(mnemonic);
+        content.Children.Add(sourceType);
+        content.Children.Add(sourceTitle);
+        content.Children.Add(sourceChapter);
+        content.Children.Add(sourceLocator);
+        content.Children.Add(sourceYear);
+        content.Children.Add(tags);
         var dialog = new ContentDialog
         {
             XamlRoot = Root.XamlRoot,
-            Title = "新建 408 记忆卡",
-            Content = content,
+            Title = "新建 408 知识卡",
+            Content = new ScrollViewer { Content = content, MaxHeight = 560 },
             PrimaryButtonText = "保存",
             CloseButtonText = "取消",
         };
         if (await dialog.ShowAsync() != ContentDialogResult.Primary) return;
-        var templates = new[] { "qa", "cloze", "layered_hint", "enumeration", "comparison" };
+        var archetypes = new[] { "concept", "scale_mapping", "formula_rule", "enumeration", "comparison", "process" };
         var subjects = new[] { "data_structures", "computer_organization", "operating_systems", "computer_networks" };
-        var lines = structured.Text.Split('\n', StringSplitOptions.TrimEntries | StringSplitOptions.RemoveEmptyEntries);
-        var validationError = MemoryValidationError(
-            templates[template.SelectedIndex], prompt.Text, answer.Text, lines);
+        var sourceTypes = new[] { "textbook", "course", "past_exam", "practice", "notes", "other" };
+        var selectedArchetype = archetypes[archetype.SelectedIndex];
+        var pointLines = Lines(points.Text);
+        var hintLines = Lines(hints.Text);
+        var template = selectedArchetype switch
+        {
+            "comparison" => "comparison",
+            "scale_mapping" or "enumeration" or "process" => "enumeration",
+            _ when hintLines.Count > 0 => "layered_hint",
+            _ => "qa",
+        };
+        var validationError = MemoryValidationError(template, prompt.Text,
+            string.IsNullOrWhiteSpace(answer.Text) ? string.Join('\n', pointLines) : answer.Text,
+            template == "layered_hint" ? hintLines : pointLines);
+        if (string.IsNullOrWhiteSpace(knowledge.Text)) validationError = "考点 / 知识点不能为空";
+        if (pointLines.Count == 0 ||
+            (new[] { "scale_mapping", "enumeration", "process" }.Contains(selectedArchetype) && pointLines.Count < 2))
+            validationError = "请填写可逐项核对的评分要点";
+        if (selectedArchetype == "formula_rule" && string.IsNullOrWhiteSpace(conditions.Text))
+            validationError = "公式规则卡需要填写适用条件与边界";
         if (validationError is not null)
         {
             await MessageAsync(validationError);
             return;
         }
-        await viewModel.Repository.CreateMemoryCardAsync(
-            templates[template.SelectedIndex], subjects[subject.SelectedIndex],
-            prompt.Text, answer.Text, lines);
+        var resolvedAnswer = string.IsNullOrWhiteSpace(answer.Text) ? string.Join('\n', pointLines) : answer.Text;
+        await viewModel.Repository.CreateMemoryCardAsync(new MemoryCardDraft(
+            template, selectedArchetype, subjects[subject.SelectedIndex], knowledge.Text,
+            prompt.Text, resolvedAnswer, hintLines, pointLines, mechanism.Text, conditions.Text,
+            contrast.Text, example.Text, commonTrap.Text, transfer.Text, mnemonic.Text,
+            StructuredPayload(selectedArchetype, pointLines, answer.Text, conditions.Text, example.Text),
+            sourceTypes[sourceType.SelectedIndex], sourceTitle.Text, sourceChapter.Text,
+            sourceLocator.Text, int.TryParse(sourceYear.Text, out var year) ? year : null,
+            ScientificTags(tags.Text, subjects[subject.SelectedIndex], selectedArchetype,
+                knowledge.Text, sourceTitle.Text, sourceChapter.Text)));
         await ShowHomeAsync();
     }
 
@@ -492,15 +658,21 @@ public sealed class MainWindow : Window
         var rows = await viewModel.Repository.SearchAsync(queryText);
         var panel = PagePanel();
         panel.Children.Add(Heading("我的题库", 28));
-        var query = new TextBox { PlaceholderText = "搜索题干、答案或来源", Text = queryText };
+        var query = new TextBox { PlaceholderText = "搜索题干、考点、来源或标签", Text = queryText };
         panel.Children.Add(query);
         panel.Children.Add(ActionButton("搜索", () => ShowLibraryAsync(query.Text)));
         panel.Children.Add(Body($"{rows.Count} 条内容"));
         foreach (var row in rows)
         {
             panel.Children.Add(Card(
-                Body(row.Kind == "math_problem" ? "数学错题" : SubjectLabel(row.Subject)),
+                Body(row.Kind == "math_problem"
+                    ? $"数学错题 · {Fallback(row.Profile.KnowledgePoint, "未标注考点")}"
+                    : $"{SubjectLabel(row.Subject)} · {ArchetypeLabel(row.Profile.Archetype)}"),
                 Heading(string.IsNullOrWhiteSpace(row.Prompt) ? "图片题面" : row.Prompt, 18),
+                Body(string.Join(" · ", new[] {
+                    row.Profile.SourceTitle, row.Profile.SourceChapter, row.Profile.SourceLocator,
+                }.Where(value => !string.IsNullOrWhiteSpace(value)))),
+                Body(string.Join("  ", JsonItems(row.TagsJson).Take(3).Select(tag => "#" + tag))),
                 Body(row.State == CardState.New ? "新内容" : $"已复习 {row.Repetitions} 次"),
                 ActionButton("查看", () => ShowLibraryDetailAsync(row))));
         }
@@ -511,7 +683,10 @@ public sealed class MainWindow : Window
     private async Task ShowLibraryDetailAsync(StudyRow row)
     {
         var panel = PagePanel();
-        panel.Children.Add(Body(row.Kind == "math_problem" ? "数学错题" : SubjectLabel(row.Subject)));
+        panel.Children.Add(Body(row.Kind == "math_problem" ? "数学错题" :
+            $"{SubjectLabel(row.Subject)} · {ArchetypeLabel(row.Profile.Archetype)}"));
+        if (!string.IsNullOrWhiteSpace(row.Profile.KnowledgePoint))
+            panel.Children.Add(Heading(row.Profile.KnowledgePoint, 18));
         panel.Children.Add(Heading(string.IsNullOrWhiteSpace(row.Prompt) ? "图片题面" : row.Prompt, 26));
         foreach (var mediaPath in await viewModel.Repository.MediaPathsAsync(row.Id))
             panel.Children.Add(new Image
@@ -522,6 +697,15 @@ public sealed class MainWindow : Window
                 HorizontalAlignment = HorizontalAlignment.Left,
             });
         panel.Children.Add(Card(Body("答案 / 解答"), Body(string.IsNullOrWhiteSpace(ReviewAnswer(row)) ? "尚未填写" : ReviewAnswer(row))));
+        foreach (var (label, value) in ReviewAnalysis(row).Where(field => !string.IsNullOrWhiteSpace(field.Value)))
+            panel.Children.Add(Card(Heading(label, 16), Body(value)));
+        var source = string.Join(" · ", new[] {
+            row.Profile.SourceTitle, row.Profile.SourceChapter, row.Profile.SourceLocator,
+            row.Profile.SourceYear?.ToString() ?? "",
+        }.Where(value => !string.IsNullOrWhiteSpace(value)));
+        if (source.Length > 0) panel.Children.Add(Body("来源 · " + source));
+        var tags = JsonItems(row.TagsJson);
+        if (tags.Count > 0) panel.Children.Add(Body(string.Join("  ", tags.Select(tag => "#" + tag))));
         if (row.Kind == "math_problem")
             panel.Children.Add(ActionButton("编辑错题复盘", () => ShowMathDetailsEditorAsync(row)));
         else
@@ -539,11 +723,102 @@ public sealed class MainWindow : Window
         _ => subject,
     };
 
-    private static IReadOnlyList<string> StructuredItems(StudyRow row)
+    private static IReadOnlyList<string> JsonItems(string json)
     {
-        try { return JsonSerializer.Deserialize<string[]>(row.StructuredJson) ?? Array.Empty<string>(); }
+        try { return JsonSerializer.Deserialize<string[]>(json) ?? Array.Empty<string>(); }
         catch (JsonException) { return Array.Empty<string>(); }
     }
+
+    private static IReadOnlyList<string> StructuredItems(StudyRow row) => JsonItems(row.HintsJson);
+
+    private static IReadOnlyList<string> Lines(string value) => value
+        .Split('\n', StringSplitOptions.TrimEntries | StringSplitOptions.RemoveEmptyEntries)
+        .Distinct(StringComparer.Ordinal).ToArray();
+
+    private static string StructuredPayload(string archetype, IReadOnlyList<string> lines,
+        string answer, string conditions, string example) => archetype switch
+    {
+        "scale_mapping" => JsonSerializer.Serialize(new {
+            rows = lines.Select(line =>
+            {
+                var cells = line.Split('|', StringSplitOptions.TrimEntries);
+                return new
+                {
+                    term = cells.ElementAtOrDefault(0) ?? "",
+                    exponent = cells.ElementAtOrDefault(1) ?? "",
+                    magnitude = cells.ElementAtOrDefault(2) ?? "",
+                };
+            }),
+        }),
+        "formula_rule" => JsonSerializer.Serialize(new {
+            formula = answer.Trim(), conditions = Lines(conditions), examples = Lines(example),
+        }),
+        "process" => JsonSerializer.Serialize(new { steps = lines }),
+        "enumeration" => JsonSerializer.Serialize(new { items = lines }),
+        _ => "{}",
+    };
+
+    private static IReadOnlyList<string> ScientificTags(
+        string raw, string subject, string archetype, string knowledgePoint,
+        string sourceTitle, string sourceChapter, string? errorReason = null)
+    {
+        var values = raw.Split([',', '，', '\n', '\r'],
+            StringSplitOptions.TrimEntries | StringSplitOptions.RemoveEmptyEntries).ToList();
+        values.Add("学科/" + SubjectTagLabel(subject));
+        values.Add("形式/" + ArchetypeLabel(archetype));
+        if (!string.IsNullOrWhiteSpace(knowledgePoint)) values.Add("考点/" + knowledgePoint.Trim());
+        if (!string.IsNullOrWhiteSpace(sourceTitle)) values.Add("来源/" + sourceTitle.Trim());
+        if (!string.IsNullOrWhiteSpace(sourceChapter)) values.Add("章节/" + sourceChapter.Trim());
+        if (errorReason is not null) values.Add("错因/" + MathErrorLabel(errorReason));
+        return values.Distinct(StringComparer.OrdinalIgnoreCase).Take(30).ToArray();
+    }
+
+    private static string SubjectTagLabel(string subject) => subject switch
+    {
+        "math" => "数学", "data_structures" => "数据结构",
+        "computer_organization" => "计算机组成原理", "operating_systems" => "操作系统",
+        "computer_networks" => "计算机网络", _ => subject,
+    };
+
+    private static string MathErrorLabel(string value) => value switch
+    {
+        "concept" => "概念", "approach" => "思路", "calculation" => "计算", "misread" => "审题",
+        "forgotten_fact" => "结论遗忘", "timeout" => "超时", _ => "其他",
+    };
+
+    private static string ArchetypeLabel(string value) => value switch
+    {
+        "concept" => "概念辨析", "comparison" => "对比", "process" => "流程",
+        "enumeration" => "枚举", "scale_mapping" => "量纲映射", "formula_rule" => "公式规则",
+        "diagram" => "图示", "cloze" => "填空", "math_error" => "错题", _ => "问答",
+    };
+
+    private static string Fallback(string value, string fallback) =>
+        string.IsNullOrWhiteSpace(value) ? fallback : value;
+
+    private static Rating MemoryEvidenceRating(
+        int hits, int count, int hintLevel, bool directReveal, int confidence)
+    {
+        var coverage = count == 0 ? 0 : hits * 1d / count;
+        var rating = coverage < .60 ? Rating.Again : coverage < .85 ? Rating.Hard :
+            confidence >= 4 ? Rating.Easy : Rating.Good;
+        return (hintLevel > 0 || directReveal) && (int)rating > (int)Rating.Hard
+            ? Rating.Hard : rating;
+    }
+
+    private static IReadOnlyList<(string Label, string Value)> ReviewAnalysis(StudyRow row) =>
+        row.Kind == "math_problem"
+            ? new[] {
+                ("原始错误", row.Profile.FirstAttempt), ("错误触发点", row.Profile.ErrorTrigger),
+                ("可迁移通法", row.Profile.GeneralMethod), ("验算方法", row.Profile.Verification),
+                ("后续变式", row.Profile.TransferPrompt),
+            }
+            : new[] {
+                ("机制", row.Profile.Mechanism), ("条件与边界", row.Profile.Conditions),
+                ("易混辨析", row.Profile.Contrast), ("例子", row.Profile.Example),
+                ("常见误区", row.Profile.CommonTrap), ("迁移问题", row.Profile.TransferPrompt),
+                ("记忆钩子", row.Profile.Mnemonic),
+            };
 
     private static string ReviewPrompt(StudyRow row) => row.TemplateType == "cloze"
         ? Regex.Replace(row.Prompt, @"\{\{c\d+::(.*?)(?:::[^}]*)?}}", "[…]")
@@ -554,7 +829,7 @@ public sealed class MainWindow : Window
         "cloze" => string.Join('\n', Regex.Matches(
             row.Prompt, @"\{\{c\d+::(.*?)(?:::[^}]*)?}}")
             .Select(match => match.Groups[1].Value)),
-        "enumeration" => string.Join('\n', StructuredItems(row).Select(item => "• " + item)),
+        "enumeration" => string.Join('\n', JsonItems(row.AnswerPointsJson).Select(item => "• " + item)),
         _ => row.Answer,
     };
 
@@ -582,26 +857,65 @@ public sealed class MainWindow : Window
             ItemsSource = new[] { "未选择", "概念不清", "思路中断", "计算错误", "审题错误", "遗忘结论", "超时", "其他" },
             SelectedIndex = 0,
         };
+        var knowledge = new TextBox { Header = "考点 / 题型", Text = row.Profile.KnowledgePoint };
+        var sourceType = new ComboBox
+        {
+            Header = "来源类型", ItemsSource = new[] { "教材", "课程", "真题", "习题", "笔记", "其他" },
+            SelectedIndex = Math.Max(0, Array.IndexOf(
+                new[] { "textbook", "course", "past_exam", "practice", "notes", "other" }, row.Profile.SourceType)),
+        };
+        var sourceTitle = new TextBox { Header = "资料名称", Text = row.Profile.SourceTitle };
+        var sourceChapter = new TextBox { Header = "章节", Text = row.Profile.SourceChapter };
+        var sourceLocator = new TextBox { Header = "页码 / 题号", Text = row.Profile.SourceLocator };
+        var sourceYear = new TextBox { Header = "年份（可选）", Text = row.Profile.SourceYear?.ToString() ?? "" };
         var solution = new TextBox { Header = "完整解答", Text = row.Answer, AcceptsReturn = true };
-        var wrongStep = new TextBox { Header = "自己的关键错误步骤", AcceptsReturn = true };
+        var wrongStep = new TextBox { Header = "自己的关键错误步骤 / 原始作答", Text = row.Profile.FirstAttempt, AcceptsReturn = true };
+        var trigger = new TextBox { Header = "错误触发点：为什么会错", Text = row.Profile.ErrorTrigger, AcceptsReturn = true };
         var hint = new TextBox { Header = "下次看到题时必须想起的一句提示", AcceptsReturn = true };
+        var method = new TextBox { Header = "可迁移的通法", Text = row.Profile.GeneralMethod, AcceptsReturn = true };
+        var verification = new TextBox { Header = "验算 / 合理性检查", Text = row.Profile.Verification, AcceptsReturn = true };
+        var transfer = new TextBox { Header = "变式或迁移任务", Text = row.Profile.TransferPrompt, AcceptsReturn = true };
+        var target = new TextBox { Header = "目标用时（秒）", Text = row.Profile.TargetSeconds?.ToString() ?? "" };
+        var tags = new TextBox { Header = "标签", Text = string.Join(", ", JsonItems(row.TagsJson)) };
         var content = new StackPanel { Spacing = 10 };
+        content.Children.Add(knowledge);
         content.Children.Add(reason);
+        content.Children.Add(sourceType);
+        content.Children.Add(sourceTitle);
+        content.Children.Add(sourceChapter);
+        content.Children.Add(sourceLocator);
+        content.Children.Add(sourceYear);
         content.Children.Add(solution);
         content.Children.Add(wrongStep);
+        content.Children.Add(trigger);
         content.Children.Add(hint);
+        content.Children.Add(method);
+        content.Children.Add(verification);
+        content.Children.Add(transfer);
+        content.Children.Add(target);
+        content.Children.Add(tags);
         var dialog = new ContentDialog
         {
             XamlRoot = Root.XamlRoot,
             Title = "完善数学错题",
-            Content = content,
+            Content = new ScrollViewer { Content = content, MaxHeight = 560 },
             PrimaryButtonText = "保存",
             CloseButtonText = "取消",
         };
         if (await dialog.ShowAsync() != ContentDialogResult.Primary) return;
         string?[] reasonValues = { null, "concept", "approach", "calculation", "misread", "forgotten_fact", "timeout", "other" };
-        await viewModel.Repository.UpdateMathDetailsAsync(
-            row.Id, solution.Text, wrongStep.Text, hint.Text, reasonValues[reason.SelectedIndex]);
+        var sourceTypes = new[] { "textbook", "course", "past_exam", "practice", "notes", "other" };
+        var selectedReason = reasonValues[reason.SelectedIndex];
+        await viewModel.Repository.UpdateMathDetailsAsync(row.Id, new MathErrorDraft(
+            KnowledgePoint: knowledge.Text, SourceType: sourceTypes[sourceType.SelectedIndex],
+            SourceTitle: sourceTitle.Text, SourceChapter: sourceChapter.Text, SourceLocator: sourceLocator.Text,
+            SourceYear: int.TryParse(sourceYear.Text, out var year) ? year : null,
+            Solution: solution.Text, FirstAttempt: wrongStep.Text, ErrorTrigger: trigger.Text,
+            ErrorReason: selectedReason, KeyHint: hint.Text, GeneralMethod: method.Text,
+            Verification: verification.Text, TransferPrompt: transfer.Text,
+            TargetSeconds: int.TryParse(target.Text, out var seconds) ? seconds : null,
+            Tags: ScientificTags(tags.Text, "math", "math_error", knowledge.Text,
+                sourceTitle.Text, sourceChapter.Text, selectedReason)));
         await ShowReviewAsync();
     }
 
@@ -627,12 +941,25 @@ public sealed class MainWindow : Window
 
     private async Task PickMathImageAsync()
     {
-        var source = new TextBox { Header = "来源（可选）", PlaceholderText = "例如：张宇 1000 题 P32" };
+        var knowledge = new TextBox { Header = "考点 / 题型", PlaceholderText = "例如：二重积分换元" };
+        var sourceType = new ComboBox
+        {
+            Header = "来源类型", ItemsSource = new[] { "教材", "课程", "真题", "习题", "笔记", "其他" },
+            SelectedIndex = 3,
+        };
+        var source = new TextBox { Header = "资料名称", PlaceholderText = "例如：张宇 1000 题" };
+        var chapter = new TextBox { Header = "章节" };
+        var locator = new TextBox { Header = "页码 / 题号" };
+        var year = new TextBox { Header = "年份（可选）" };
+        var tags = new TextBox { Header = "标签（逗号或换行分隔）" };
+        var fields = new StackPanel { Spacing = 10 };
+        fields.Children.Add(knowledge); fields.Children.Add(sourceType); fields.Children.Add(source);
+        fields.Children.Add(chapter); fields.Children.Add(locator); fields.Children.Add(year); fields.Children.Add(tags);
         var sourceDialog = new ContentDialog
         {
             XamlRoot = Root.XamlRoot,
             Title = "数学错题快速录入",
-            Content = source,
+            Content = fields,
             PrimaryButtonText = "选择图片",
             CloseButtonText = "取消",
         };
@@ -650,7 +977,14 @@ public sealed class MainWindow : Window
             await MessageAsync("每道题最多选择 5 张图片。");
             return;
         }
-        await viewModel.Repository.CreateMathProblemAsync(files.Select(file => file.Path).ToArray(), source.Text);
+        var sourceTypes = new[] { "textbook", "course", "past_exam", "practice", "notes", "other" };
+        await viewModel.Repository.CreateMathProblemAsync(files.Select(file => file.Path).ToArray(),
+            new MathErrorDraft(
+                KnowledgePoint: knowledge.Text, SourceType: sourceTypes[sourceType.SelectedIndex],
+                SourceTitle: source.Text, SourceChapter: chapter.Text, SourceLocator: locator.Text,
+                SourceYear: int.TryParse(year.Text, out var sourceYear) ? sourceYear : null,
+                Tags: ScientificTags(tags.Text, "math", "math_error", knowledge.Text,
+                    source.Text, chapter.Text)));
         await ShowHomeAsync();
     }
 
@@ -779,16 +1113,9 @@ public sealed class MainWindow : Window
             column.Children.Add(new Border
             {
                 Height = 12 + 92d * item.Value / maximum,
-                Background = new LinearGradientBrush
-                {
-                    StartPoint = new Windows.Foundation.Point(0, 0), EndPoint = new Windows.Foundation.Point(0, 1),
-                    GradientStops =
-                    {
-                        new GradientStop { Color = color, Offset = 0 },
-                        new GradientStop { Color = Windows.UI.Color.FromArgb(75, color.R, color.G, color.B), Offset = 1 },
-                    },
-                },
-                CornerRadius = new CornerRadius(8, 8, 3, 3),
+                Background = new SolidColorBrush(color),
+                Opacity = .82,
+                CornerRadius = new CornerRadius(4, 4, 2, 2),
             });
             column.Children.Add(new TextBlock { Text = item.Label, HorizontalAlignment = HorizontalAlignment.Center, FontSize = 12, Opacity = .72 });
             Grid.SetColumn(column, index); chart.Children.Add(column);
@@ -798,7 +1125,11 @@ public sealed class MainWindow : Window
 
     private static Button ActionButton(string label, Func<Task> action)
     {
-        var button = new Button { Content = label, MinHeight = DesignTokens.MinimumTarget };
+        var button = new Button
+        {
+            Content = label, MinHeight = DesignTokens.MinimumTarget,
+            CornerRadius = new CornerRadius(6), Padding = new Thickness(15, 8, 15, 8),
+        };
         button.Click += async (_, _) =>
         {
             button.IsEnabled = false;

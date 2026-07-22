@@ -10,6 +10,9 @@ const schemaV2 = JSON.parse(readFileSync(
 const schemaV3 = JSON.parse(readFileSync(
   new URL('../backup-v3.schema.json', import.meta.url), 'utf8',
 ));
+const schemaV5 = JSON.parse(readFileSync(
+  new URL('../backup-v5.schema.json', import.meta.url), 'utf8',
+));
 assert.equal(schema.properties.format.const, 'reviewfault-backup');
 assert.equal(schema.properties.version.const, 1);
 assert.equal(schema.properties.schemaVersion.const, 1);
@@ -43,6 +46,11 @@ assert.equal(schemaV3.properties.schedulerAbiVersion.const, 3);
 const appVersionPatternV3 = new RegExp(schemaV3.properties.appVersion.pattern);
 assert(appVersionPatternV3.test('0.3.0'));
 assert(!appVersionPatternV3.test('0.2.3'));
+
+assert.equal(schemaV5.properties.version.const, 5);
+assert.equal(schemaV5.properties.schemaVersion.const, 5);
+assert.equal(schemaV5.properties.schedulerAbiVersion.const, 5);
+assert(schemaV5.required.includes('excludedTables'));
 
 const implementations = [
   '../../apps/android/app/src/main/java/cn/reviewfault/app/data/AppDatabase.kt',

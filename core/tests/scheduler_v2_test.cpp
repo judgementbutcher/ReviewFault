@@ -151,7 +151,7 @@ void test_replay_and_validation() {
 }
 
 void test_c_abi_v2() {
-  expect(rf_scheduler_abi_version() == 4,
+  expect(rf_scheduler_abi_version() == 5,
          "current C ABI retains the version two entry points");
   auto memory = rf_new_memory_state_v2();
   rf_memory_review_input_v2 memory_input{sizeof(rf_memory_review_input_v2),

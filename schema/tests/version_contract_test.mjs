@@ -1,11 +1,11 @@
 import assert from 'node:assert/strict';
 import { readFileSync, readdirSync } from 'node:fs';
 
-const version = '0.5.0';
+const version = '0.6.0';
 const read = (relative) => readFileSync(new URL(relative, import.meta.url), 'utf8');
 
 const contracts = [
-  ['README', '../../README.md', `当前版本为 **${version}**`],
+  ['README', '../../README.md', `当前开发版本为 **${version}**`],
   ['CMake', '../../CMakeLists.txt', `VERSION ${version}`],
   ['Android', '../../apps/android/app/build.gradle.kts', `versionName = "${version}"`],
   ['Harmony', '../../apps/harmony/AppScope/app.json5', `"versionName": "${version}"`],
@@ -21,9 +21,9 @@ const contracts = [
 for (const [name, path, token] of contracts) {
   assert(read(path).includes(token), `${name} is not synchronized to ${version}`);
 }
-assert(read('../../apps/android/app/build.gradle.kts').includes('versionCode = 10') &&
-  read('../../apps/harmony/AppScope/app.json5').includes('"versionCode": 10'),
-  'mobile version codes must advance together for v0.5.0');
+assert(read('../../apps/android/app/build.gradle.kts').includes('versionCode = 11') &&
+  read('../../apps/harmony/AppScope/app.json5').includes('"versionCode": 11'),
+  'mobile version codes must advance together for v0.6.0');
 
 for (const repository of ['../../apps/windows/ReviewFault/Data/AppRepository.cs']) {
   assert(read(repository).includes(version), `${repository} backup metadata is stale`);

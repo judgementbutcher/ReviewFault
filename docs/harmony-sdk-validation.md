@@ -1,14 +1,14 @@
 # HarmonyOS 6 SDK validation gate
 
-The v0.5.0 project targets Stage model and `compatibleSdkVersion 6.0.0(20)`.
+The v0.6.0 project targets Stage model and `compatibleSdkVersion 6.0.0(20)`.
 That level is not considered validated by source review alone. The release job
 requires a self-hosted runner carrying labels `harmonyos-6` and `api-20`; it must
 use the current stable DevEco Studio toolchain and fail before publishing unless
 all checks below pass.
 
 - ArkTS/ArkUI module compilation and signed HAP assembly;
-- C++20 NAPI build with ABI v4 symbols and canonical replay call;
-- RdbStore execution of migrations v1 through v4, JSON1, triggers and window functions;
+- C++20 NAPI build with ABI v5 symbols and canonical replay call;
+- RdbStore execution of migrations v1 through v5, JSON1, triggers and window functions;
 - HUKS key generation, encrypted token restore and foreground/background lifecycle;
 - signature verification plus `cn.reviewfault.app` bundle inspection;
 - install/launch on the target HarmonyOS 6 tablet in portrait, landscape and split screen.

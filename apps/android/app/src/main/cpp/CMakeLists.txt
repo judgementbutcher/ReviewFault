@@ -10,6 +10,7 @@ add_library(reviewfault SHARED
     "${REVIEWFAULT_ROOT}/core/src/scheduler_v2.cpp"
     "${REVIEWFAULT_ROOT}/core/src/scheduler_v3.cpp"
     "${REVIEWFAULT_ROOT}/core/src/scheduler_v4.cpp"
+    "${REVIEWFAULT_ROOT}/core/src/scheduler_v5.cpp"
     "${REVIEWFAULT_ROOT}/core/src/reviewfault_c.cpp"
 )
 

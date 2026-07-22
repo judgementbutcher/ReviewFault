@@ -1,5 +1,6 @@
 #include "reviewfault/reviewfault_c.h"
 #include "reviewfault/scheduler_v4.hpp"
+#include "reviewfault/scheduler_v5.hpp"
 
 #include "reviewfault/scheduler.hpp"
 #include "reviewfault/scheduler_v2.hpp"
@@ -140,6 +141,26 @@ rf_math_schedule_state_v2 to_c_math_state(
           state.due_at,
           state.last_reviewed_at,
           state.repetitions};
+}
+
+reviewfault::MathTaskStateV5 to_cpp_math_task_state(const rf_math_task_state_v5& state) {
+  if (state.struct_size != sizeof(rf_math_task_state_v5)) {
+    throw std::invalid_argument("ABI v5 math task state size mismatch");
+  }
+  if (state.phase < RF_MATH_PHASE_REPAIR || state.phase > RF_MATH_PHASE_GRADUATED) {
+    throw std::invalid_argument("ABI v5 math task phase is invalid");
+  }
+  return {static_cast<reviewfault::MathTaskPhaseV5>(state.phase), state.due_at,
+          state.last_reviewed_at, state.repetitions, state.consecutive_failures,
+          state.original_verified != 0, state.variant_verified != 0,
+          state.transfer_verified != 0, state.speed_verified != 0};
+}
+
+rf_math_task_state_v5 to_c_math_task_state(const reviewfault::MathTaskStateV5& state) {
+  return {sizeof(rf_math_task_state_v5), static_cast<int32_t>(state.phase), state.due_at,
+          state.last_reviewed_at, state.repetitions, state.consecutive_failures,
+          state.original_verified ? 1 : 0, state.variant_verified ? 1 : 0,
+          state.transfer_verified ? 1 : 0, state.speed_verified ? 1 : 0};
 }
 
 reviewfault::MathScheduleState to_cpp_math_state(
@@ -492,6 +513,115 @@ int32_t replay_math_history_v4(
         {static_cast<reviewfault::MathIntensity>(config->intensity)});
     result->state = to_c_math_state(replay.state);
     result->action_count = replay.action_count;
+  }, error_buffer, error_buffer_size);
+}
+
+size_t rf_memory_task_review_result_v5_size(void) {
+  return sizeof(rf_memory_task_review_result_v5);
+}
+
+size_t rf_math_task_review_result_v5_size(void) {
+  return sizeof(rf_math_task_review_result_v5);
+}
+
+size_t rf_session_plan_summary_v5_size(void) {
+  return sizeof(rf_session_plan_summary_v5);
+}
+
+int32_t review_memory_task_v5(const rf_memory_task_review_input_v5* input,
+                              rf_memory_task_review_result_v5* result,
+                              char* error_buffer, size_t error_buffer_size) {
+  return invoke_v2([&] {
+    if (input == nullptr || result == nullptr ||
+        input->struct_size != sizeof(rf_memory_task_review_input_v5) ||
+        result->struct_size != sizeof(rf_memory_task_review_result_v5) ||
+        input->state.struct_size != sizeof(rf_memory_schedule_state_v2)) {
+      throw std::invalid_argument("ABI v5 memory task structure size mismatch");
+    }
+    const auto reviewed = reviewfault::review_memory_task_v5({
+        to_cpp_memory_state(input->state), static_cast<reviewfault::MemoryPreset>(input->preset),
+        input->reviewed_at, input->point_hits, input->point_count, input->hint_level,
+        input->answer_revealed != 0, input->duration_reliable != 0,
+        input->duration_seconds, input->confidence, input->history_event_count,
+        input->calibration_improvement, input->consecutive_lapses});
+    result->review = {sizeof(rf_memory_review_result_v3), to_c_memory_state(reviewed.review.state),
+                      to_c_memory_event_v3(reviewed.review.event)};
+    result->effective_rating = static_cast<int32_t>(reviewed.effective_rating);
+    result->point_coverage = reviewed.point_coverage;
+    result->rating_capped_by_help = reviewed.rating_capped_by_help ? 1 : 0;
+  }, error_buffer, error_buffer_size);
+}
+
+int32_t review_math_task_v5(const rf_math_task_review_input_v5* input,
+                            rf_math_task_review_result_v5* result,
+                            char* error_buffer, size_t error_buffer_size) {
+  return invoke_v2([&] {
+    if (input == nullptr || result == nullptr ||
+        input->struct_size != sizeof(rf_math_task_review_input_v5) ||
+        result->struct_size != sizeof(rf_math_task_review_result_v5)) {
+      throw std::invalid_argument("ABI v5 math task structure size mismatch");
+    }
+    const auto reviewed = reviewfault::review_math_task_v5({
+        to_cpp_math_task_state(input->state), input->reviewed_at, input->correct != 0,
+        input->hint_revealed != 0, input->speed_target_met != 0,
+        input->variant_available != 0, input->error_mask, input->duration_seconds,
+        input->confidence});
+    result->state = to_c_math_task_state(reviewed.state);
+    result->phase_before = static_cast<int32_t>(reviewed.phase_before);
+    result->advanced = reviewed.advanced ? 1 : 0;
+    result->regressed = reviewed.regressed ? 1 : 0;
+    result->repair_mask = reviewed.repair_mask;
+  }, error_buffer, error_buffer_size);
+}
+
+uint32_t remaining_exam_validations_v5(int64_t now, int64_t exam_at) {
+  return reviewfault::remaining_exam_validations_v5(now, exam_at);
+}
+
+int32_t plan_session_v5(const rf_session_task_v5* tasks, size_t task_count,
+                        const rf_learning_profile_v5* profile, int64_t now,
+                        uint32_t available_seconds, rf_planned_task_v5* output_tasks,
+                        size_t output_count, rf_session_plan_summary_v5* summary,
+                        char* error_buffer, size_t error_buffer_size) {
+  return invoke_v2([&] {
+    if ((task_count > 0 && tasks == nullptr) || profile == nullptr || summary == nullptr ||
+        profile->struct_size != sizeof(rf_learning_profile_v5) ||
+        summary->struct_size != sizeof(rf_session_plan_summary_v5)) {
+      throw std::invalid_argument("ABI v5 session plan structure size mismatch");
+    }
+    std::vector<reviewfault::SessionTaskV5> converted;
+    converted.reserve(task_count);
+    for (size_t index = 0; index < task_count; ++index) {
+      const auto& task = tasks[index];
+      if (task.struct_size != sizeof(rf_session_task_v5) || task.id == nullptr ||
+          task.unit_id == nullptr || task.subject == nullptr || task.chapter_id == nullptr ||
+          task.type < RF_TASK_MATH_REPAIR || task.type > RF_TASK_MEMORY_CALCULATE) {
+        throw std::invalid_argument("ABI v5 session task is invalid");
+      }
+      converted.push_back({task.id, task.unit_id, task.subject, task.chapter_id,
+          static_cast<reviewfault::LearningTaskTypeV5>(task.type), task.due_at,
+          task.estimated_seconds, task.consecutive_failures, task.dependency_ready != 0,
+          task.is_new != 0, task.confusable != 0, task.remaining_validations});
+    }
+    const auto plan = reviewfault::plan_session_v5(converted,
+        {profile->exam_at, profile->daily_available_minutes, profile->study_days_mask,
+         profile->math_percent, profile->target_retention}, now, available_seconds);
+    if (output_count < plan.tasks.size() || (plan.tasks.size() > 0 && output_tasks == nullptr)) {
+      throw std::invalid_argument("ABI v5 session output is too small");
+    }
+    for (size_t out = 0; out < plan.tasks.size(); ++out) {
+      const auto it = std::find_if(converted.begin(), converted.end(), [&](const auto& task) {
+        return task.id == plan.tasks[out].task.id;
+      });
+      output_tasks[out] = {sizeof(rf_planned_task_v5),
+                           static_cast<size_t>(std::distance(converted.begin(), it)),
+                           static_cast<int32_t>(plan.tasks[out].section)};
+    }
+    summary->estimated_seconds = plan.estimated_seconds;
+    summary->review_debt_seconds = plan.review_debt_seconds;
+    summary->omitted_new_count = plan.omitted_new_count;
+    summary->new_learning_blocked = plan.new_learning_blocked ? 1 : 0;
+    summary->task_count = plan.tasks.size();
   }, error_buffer, error_buffer_size);
 }
 

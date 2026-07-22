@@ -13,7 +13,10 @@ import cn.reviewfault.app.data.DeletionState
 import cn.reviewfault.app.data.LearningPreferences
 import cn.reviewfault.app.data.InsightsSnapshot
 import cn.reviewfault.app.data.LibraryFilter
+import cn.reviewfault.app.data.MathErrorDraft
+import cn.reviewfault.app.data.MemoryCardDraft
 import cn.reviewfault.app.data.StudyRow
+import cn.reviewfault.app.data.TagRow
 import cn.reviewfault.app.sync.AccountTokens
 import cn.reviewfault.app.sync.AuthSession
 import cn.reviewfault.app.sync.SecureTokenStore
@@ -42,6 +45,7 @@ data class AppUiState(
     val summary: DashboardSummary = DashboardSummary(0, 0, 0, 0),
     val insights: InsightsSnapshot = InsightsSnapshot(),
     val library: List<StudyRow> = emptyList(),
+    val availableTags: List<TagRow> = emptyList(),
     val trash: List<StudyRow> = emptyList(),
     val selectedIds: Set<String> = emptySet(),
     val libraryFilter: LibraryFilter = LibraryFilter(),
@@ -162,6 +166,15 @@ class AppViewModel(application: Application, private val savedState: SavedStateH
         loadLibrary()
     }
 
+    fun toggleTagFilter(tagId: String) {
+        val current = filterState.value
+        val nextTags = current.tagIds.toMutableSet().apply { if (!add(tagId)) remove(tagId) }
+        val next = current.copy(tagIds = nextTags, offset = 0, now = Instant.now().epochSecond)
+        filterState.value = next
+        mutableState.update { it.copy(libraryFilter = next) }
+        loadLibrary()
+    }
+
     fun refreshToday() = io {
         refreshTodayNow()
     }
@@ -187,6 +200,7 @@ class AppViewModel(application: Application, private val savedState: SavedStateH
         )
         mutableState.update { it.copy(
             library = database.search(filter),
+            availableTags = database.tags(),
             libraryFilter = filter,
             loading = false,
         ) }
@@ -303,7 +317,9 @@ class AppViewModel(application: Application, private val savedState: SavedStateH
     fun revealAnswer() = mutableState.update { it.copy(answerRevealed = true) }
 
     fun score(rating: Int, mathResult: String?, errorReason: String? = null,
-              hintRevealed: Boolean = false) = io(exclusive = true) {
+              hintRevealed: Boolean = false, hintLevel: Int = if (hintRevealed) 1 else 0,
+              pointHits: Int? = null, pointCount: Int? = null, confidence: Int = 3,
+              reflection: String = "", answerRevealedBeforeCommit: Boolean = false) = io(exclusive = true) {
         val snapshot = mutableState.value
         val row = snapshot.current ?: return@io
         val reviewedAt = Instant.now().epochSecond
@@ -311,7 +327,8 @@ class AppViewModel(application: Application, private val savedState: SavedStateH
         pendingInk?.takeIf { it.first == row.id }?.let { database.saveInkDraft(row.id, it.second) }
         val result = database.review(
             row, rating, reviewedAt, durationSeconds,
-            mathResult, errorReason, hintRevealed,
+            mathResult, errorReason, hintRevealed, hintLevel, pointHits, pointCount,
+            confidence, reflection, answerRevealedBeforeCommit,
         )
         if (row.kind == "math_problem") database.freezeInkDraft(row.id)
         pendingInk = null
@@ -467,6 +484,12 @@ class AppViewModel(application: Application, private val savedState: SavedStateH
         syncNow()
     }
 
+    fun createMemoryCard(draft: MemoryCardDraft) = io(exclusive = true) {
+        database.createMemoryCard(draft)
+        mutableState.update { it.copy(destination = AppDestination.Today, message = "408 知识卡已保存") }
+        refreshTodayNow(); loadLibrary(); syncNow()
+    }
+
     fun createMathProblem(uris: List<Uri>, source: String) = io(exclusive = true) {
         database.createMathProblemFromImages(getApplication<Application>().contentResolver, uris, source)
         mutableState.update { it.copy(destination = AppDestination.Today, message = "数学错题已保存") }
@@ -474,11 +497,17 @@ class AppViewModel(application: Application, private val savedState: SavedStateH
         syncNow()
     }
 
+    fun createMathProblem(uris: List<Uri>, draft: MathErrorDraft) = io(exclusive = true) {
+        database.createMathProblemFromImages(getApplication<Application>().contentResolver, uris, draft)
+        mutableState.update { it.copy(destination = AppDestination.Today, message = "数学错题与诊断已保存") }
+        refreshTodayNow(); loadLibrary(); syncNow()
+    }
+
     fun exportBackup(uri: Uri) = io(exclusive = true) {
         getApplication<Application>().contentResolver.openOutputStream(uri, "w")!!.use {
             database.exportBackup(it)
         }
-        mutableState.update { it.copy(message = "v4 备份已导出") }
+        mutableState.update { it.copy(message = "v5 备份已导出") }
     }
 
     fun restoreBackup(uri: Uri) = io(exclusive = true) {

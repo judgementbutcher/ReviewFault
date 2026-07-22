@@ -58,6 +58,9 @@ int main() {
   const auto canonical_v4 = load<int32_t (*)(const rf_review_action_v4*, size_t,
                                                size_t*, size_t, char*, size_t)>(
       library, "canonical_review_order_v4");
+  const auto memory_task_v5 = load<int32_t (*)(const rf_memory_task_review_input_v5*,
+                                                rf_memory_task_review_result_v5*, char*, size_t)>(
+      library, "review_memory_task_v5");
 
   if (abi_version() != RF_SCHEDULER_ABI_VERSION ||
       config_size() != sizeof(rf_scheduler_config) || card_size() != sizeof(rf_card) ||
@@ -136,6 +139,24 @@ int main() {
   if (canonical_v4(actions, 2, order, 2, error, sizeof(error)) != 0 ||
       order[0] != 1 || order[1] != 0) {
     std::cerr << "dynamic v4 canonical replay failed: " << error << '\n';
+    dlclose(library);
+    return EXIT_FAILURE;
+  }
+  rf_memory_task_review_input_v5 task_input{};
+  task_input.struct_size = sizeof(task_input);
+  task_input.state = load<rf_memory_schedule_state_v2 (*)()>(
+      library, "rf_new_memory_state_v2")();
+  task_input.preset = RF_MEMORY_BALANCED;
+  task_input.reviewed_at = 1'800'000'000;
+  task_input.point_hits = 3;
+  task_input.point_count = 3;
+  task_input.duration_reliable = 1;
+  task_input.confidence = 5;
+  rf_memory_task_review_result_v5 task_result{};
+  task_result.struct_size = sizeof(task_result);
+  if (memory_task_v5(&task_input, &task_result, error, sizeof(error)) != 0 ||
+      task_result.effective_rating != RF_RATING_EASY || task_result.point_coverage != 1.0) {
+    std::cerr << "dynamic v5 memory task review failed: " << error << '\n';
     dlclose(library);
     return EXIT_FAILURE;
   }

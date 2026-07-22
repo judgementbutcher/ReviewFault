@@ -2,7 +2,7 @@
 
 ReviewFault 是面向考研数学与 408 的本地优先间隔学习软件。它不是把两类内容都压成普通闪卡：数学侧强调低摩擦记录、重做与错因复盘；408 侧强调主动回忆、分层提示与知识点关联。
 
-当前版本为 **0.5.0**（schema v4、调度 ABI v4、备份协议 v4；调度算法仍为 v3），包含共享核心、同步服务和三个原生客户端：
+当前开发版本为 **0.6.0**，引入 **schema v5、调度 ABI v5、备份协议 v5**：数学以错题簇阶段验证，408 以知识包的证据驱动主动回忆调度；旧 v1-v4 历史仍通过冻结算法回放。
 
 - Android：Kotlin + Jetpack Compose
 - Windows：C# + WinUI 3
@@ -23,6 +23,7 @@ Android 调试 APK 在完成 Android 构建后位于 `apps/android/app/build/out
 ## 文档
 
 - [产品定义](docs/product.md)
+- [科学制卡与复习协议](docs/card-system.md)
 - [技术架构](docs/architecture.md)
 - [调度算法](docs/scheduler.md)
 - [跨端数据契约](docs/data-model.md)
@@ -32,7 +33,7 @@ Android 调试 APK 在完成 Android 构建后位于 `apps/android/app/build/out
 - [需求验证矩阵](docs/verification.md)
 - [视觉与无障碍 token](docs/design-tokens.md)
 - [HarmonyOS 6 SDK 验证门禁](docs/harmony-sdk-validation.md)
-- [v0.5.0 发布说明](docs/release-v0.5.0.md)
+- [v0.6.0 发布说明](docs/release-v0.6.0.md)
 - [v0.4.0 发布说明](docs/release-v0.4.0.md)
 - [v0.2 调度回放基线](docs/baseline-v0.2.md)
 - [v0.3.2 开发计划](docs/roadmap-v0.3.2.md)
@@ -43,12 +44,15 @@ Android 调试 APK 在完成 Android 构建后位于 `apps/android/app/build/out
 固定 v3 决策结果。JNI 和 P/Invoke 绑定只有在
 相同输入产生相同状态与 UTC 到期秒时才算接入完成。
 
-## v0.5 数据洞察与现代暗黑界面
+## v0.6 科学制卡、证据复习与中性暗黑界面
 
 - Android、Windows 与 HarmonyOS 增加统一“洞察”入口；
+- 408 结构化卡片支持知识形式、评分要点、分层提示、机制/边界/迁移和来源标签；
+- 数学错题支持首次作答、错因触发、通法、验算、迁移和目标用时；
+- 复习证据包含主动回忆草稿、信心、提示层级、逐点评分、答案提前展示和反思；
 - 展示近 7 日复习活跃度、未来 7 日到期负载、正确率、连续学习与累计复习；
-- 展示知识库熟练进度和学科分布，指标完全来自本地不可变复习历史；
-- 三端采用现代暗黑底色、半透明玻璃表面、柔和渐变与渐入/柱状增长动效；
+- 三端采用中性灰黑实色表面、8px 以内圆角和短时自然动效，减少渐变与装饰性视觉噪声；
+- v5 `card_profile_v5`、`learning_evidence_v5` 和 `cardProfile` 同步实体跨端一致；
 - 本次正式发布 Android APK 与 Windows MSI/便携 ZIP，HarmonyOS 保持同版本源码与签名构建能力。
 
 ## v0.4 数据与交付基线

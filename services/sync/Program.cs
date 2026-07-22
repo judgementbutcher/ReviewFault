@@ -244,7 +244,7 @@ app.MapPost("/api/v1/sync/push", async (PushRequest request, ClaimsPrincipal pri
             return Results.Conflict(Problem("device_counter_regression"));
         var seq = ++workspace.LastServerSeq;
         var projectedPayload = operation.ChangedFields;
-        if (operation.EntityType is not ("reviewAction" or "attempt" or "attemptArtifact" or "relation")) {
+        if (operation.EntityType is not ("reviewAction" or "attempt" or "attemptArtifact" or "relation" or "learningEvidence" or "learningRelation")) {
             var state = db.EntityStates.Local.FirstOrDefault(x => x.WorkspaceId == workspaceId && x.EntityType == operation.EntityType && x.EntityId == operation.EntityId)
                 ?? await db.EntityStates.SingleOrDefaultAsync(x => x.WorkspaceId == workspaceId && x.EntityType == operation.EntityType && x.EntityId == operation.EntityId);
             if (state is null) {
@@ -428,8 +428,9 @@ static object Problem(string code, IEnumerable<string>? details = null) => new {
 static bool FixedTokenEquals(string left, string right) => CryptographicOperations.FixedTimeEquals(
     SHA256.HashData(Encoding.UTF8.GetBytes(left)), SHA256.HashData(Encoding.UTF8.GetBytes(right)));
 static bool ValidOperation(SyncOperation operation) {
-    ReadOnlySpan<string> entityTypes = ["chapter", "studyItem", "mathProblem", "memoryCard", "tag",
-        "relation", "reviewAction", "attempt", "attemptArtifact", "learningPreferences"];
+    ReadOnlySpan<string> entityTypes = ["chapter", "studyItem", "mathProblem", "memoryCard", "cardProfile", "tag",
+        "relation", "reviewAction", "attempt", "attemptArtifact", "learningPreferences",
+        "learningUnit", "learningTask", "learningRelation", "learningEvidence", "learningProfile"];
     ReadOnlySpan<string> actions = ["create", "update", "delete", "restore", "add", "remove"];
     return operation.DeviceCounter > 0 && operation.BaseCursor >= 0 && operation.BaseRevision >= 0 &&
         operation.EntityId.Length is > 0 and <= 200 && entityTypes.Contains(operation.EntityType) &&

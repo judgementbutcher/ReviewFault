@@ -5,34 +5,19 @@ namespace ReviewFault.Components;
 
 public static class DesignTokens
 {
-    public static readonly Windows.UI.Color Brand = Windows.UI.Color.FromArgb(255, 120, 232, 193);
-    public static readonly Windows.UI.Color LightBackground = Windows.UI.Color.FromArgb(255, 247, 245, 239);
-    public static readonly Windows.UI.Color DarkBackground = Windows.UI.Color.FromArgb(255, 7, 17, 15);
-    public static readonly Windows.UI.Color LightHeading = Windows.UI.Color.FromArgb(255, 30, 54, 43);
-    public static readonly Windows.UI.Color DarkHeading = Windows.UI.Color.FromArgb(255, 229, 240, 236);
-    public static readonly Windows.UI.Color GlassSurface = Windows.UI.Color.FromArgb(220, 16, 28, 25);
-    public static readonly Windows.UI.Color GlassBorder = Windows.UI.Color.FromArgb(130, 62, 91, 82);
-    public static readonly Windows.UI.Color Purple = Windows.UI.Color.FromArgb(255, 201, 184, 255);
-    public static CornerRadius CardRadius => new(22);
-    public static Thickness CardPadding => new(20);
+    public static readonly Windows.UI.Color Brand = Windows.UI.Color.FromArgb(255, 212, 243, 106);
+    public static readonly Windows.UI.Color LightBackground = Windows.UI.Color.FromArgb(255, 242, 243, 244);
+    public static readonly Windows.UI.Color DarkBackground = Windows.UI.Color.FromArgb(255, 9, 10, 12);
+    public static readonly Windows.UI.Color LightHeading = Windows.UI.Color.FromArgb(255, 25, 27, 30);
+    public static readonly Windows.UI.Color DarkHeading = Windows.UI.Color.FromArgb(255, 240, 242, 243);
+    public static readonly Windows.UI.Color GlassSurface = Windows.UI.Color.FromArgb(255, 18, 20, 23);
+    public static readonly Windows.UI.Color GlassBorder = Windows.UI.Color.FromArgb(255, 42, 46, 51);
+    public static readonly Windows.UI.Color Purple = Windows.UI.Color.FromArgb(255, 157, 163, 169);
+    public static CornerRadius CardRadius => new(8);
+    public static Thickness CardPadding => new(18);
     public const double MinimumTarget = 48;
 
-    public static Brush BackgroundBrush => new LinearGradientBrush
-    {
-        StartPoint = new Windows.Foundation.Point(0, 0),
-        EndPoint = new Windows.Foundation.Point(1, 1),
-        GradientStops =
-        {
-            new GradientStop { Color = DarkBackground, Offset = 0 },
-            new GradientStop { Color = Windows.UI.Color.FromArgb(255, 10, 27, 27), Offset = .52 },
-            new GradientStop { Color = Windows.UI.Color.FromArgb(255, 18, 17, 34), Offset = 1 },
-        },
-    };
+    public static Brush BackgroundBrush => new SolidColorBrush(DarkBackground);
 
-    public static Brush GlassBrush => new AcrylicBrush
-    {
-        TintColor = GlassSurface,
-        TintOpacity = .84,
-        FallbackColor = GlassSurface,
-    };
+    public static Brush GlassBrush => new SolidColorBrush(GlassSurface);
 }

@@ -59,7 +59,7 @@ for (const [name, repositoryPath, uiPath] of [
     assert(repository.toLowerCase().includes(token), `${name} insights repository is missing ${token}`);
   for (const token of ['洞察', '复习活跃度', '未来负载', '知识库进度'])
     assert(ui.includes(token), `${name} insights UI is missing ${token}`);
-  assert(ui.includes('07110F') || ui.includes('BackgroundBrush'),
+  assert(ui.includes('07110F') || ui.includes('090A0C') || ui.includes('BackgroundBrush'),
     `${name} UI is missing the modern dark foundation`);
 }
 

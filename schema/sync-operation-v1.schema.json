@@ -11,7 +11,7 @@
     "deviceCounter": { "type": "integer", "minimum": 1 },
     "baseCursor": { "type": "integer", "minimum": 0 },
     "baseRevision": { "type": "integer", "minimum": 0 },
-    "entityType": { "type": "string", "enum": ["chapter", "studyItem", "mathProblem", "memoryCard", "tag", "relation", "reviewAction", "attempt", "attemptArtifact", "learningPreferences"] },
+    "entityType": { "type": "string", "enum": ["chapter", "studyItem", "mathProblem", "memoryCard", "cardProfile", "tag", "relation", "reviewAction", "attempt", "attemptArtifact", "learningPreferences", "learningUnit", "learningTask", "learningRelation", "learningEvidence", "learningProfile"] },
     "entityId": { "type": "string", "minLength": 1, "maxLength": 200 },
     "action": { "type": "string", "enum": ["create", "update", "delete", "restore", "add", "remove"] },
     "changedFields": { "type": "object" },

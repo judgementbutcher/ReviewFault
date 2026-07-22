@@ -218,8 +218,8 @@ void test_validation() {
 }
 
 void test_c_abi() {
-  expect(rf_scheduler_abi_version() == 4,
-         "C ABI reports v4 while retaining the v1 review export");
+  expect(rf_scheduler_abi_version() == 5,
+         "C ABI reports v5 while retaining the v1 review export");
   expect(rf_scheduler_config_size() == sizeof(rf_scheduler_config),
          "C ABI reports config layout size");
   expect(rf_card_size() == sizeof(rf_card), "C ABI reports card layout size");

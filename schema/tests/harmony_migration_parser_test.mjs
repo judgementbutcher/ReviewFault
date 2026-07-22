@@ -14,7 +14,7 @@ function harmonyStatements(script) {
         line.toUpperCase() === 'BEGIN IMMEDIATE;' || line.toUpperCase() === 'COMMIT;') continue;
     if (line.toUpperCase().startsWith('CREATE TRIGGER')) trigger = true;
     current += `${raw}\n`;
-    const complete = trigger ? line.toUpperCase() === 'END;' : line.endsWith(';');
+    const complete = trigger ? line.toUpperCase().endsWith('END;') : line.endsWith(';');
     if (complete) {
       result.push(current.trim().replace(/;$/, ''));
       current = '';
@@ -26,7 +26,7 @@ function harmonyStatements(script) {
 }
 
 const db = new DatabaseSync(':memory:');
-for (const name of ['001_initial.sql', '002_v0_2.sql', '003_v0_3.sql', '004_v0_4.sql']) {
+for (const name of ['001_initial.sql', '002_v0_2.sql', '003_v0_3.sql', '004_v0_4.sql', '005_v0_5.sql']) {
   const script = readFileSync(new URL(`../migrations/${name}`, import.meta.url), 'utf8');
   const statements = harmonyStatements(script);
   assert(statements.length > 0, `${name} produced no Harmony Rdb statements`);
@@ -39,7 +39,7 @@ for (const name of ['001_initial.sql', '002_v0_2.sql', '003_v0_3.sql', '004_v0_4
     throw new Error(`Harmony Rdb statement split failed for ${name}: ${error.message}`, { cause: error });
   }
 }
-assert.equal(db.prepare('SELECT schema_version FROM schema_metadata').get().schema_version, 4);
+assert.equal(db.prepare('SELECT schema_version FROM schema_metadata').get().schema_version, 5);
 assert.equal(db.prepare('PRAGMA foreign_key_check').all().length, 0);
 db.close();
-console.log('Harmony Rdb v1 to v4 statement parser tests passed');
+console.log('Harmony Rdb v1 to v5 statement parser tests passed');

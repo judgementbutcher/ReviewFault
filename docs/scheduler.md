@@ -1,4 +1,6 @@
-# ReviewFault 调度 ABI v4（算法 v3）
+# ReviewFault 调度 ABI v5（保留算法 v3 回放）
+
+v5 在 v4 的不可变历史回放之上增加任务级 ABI：`review_memory_task_v5` 先用要点覆盖、提示/答案暴露、可靠耗时和信心折算有效 FSRS 评分；提示或答案暴露最高只能得到 Hard。`review_math_task_v5` 以修补、原题、变式、迁移、保持的阶段推进，任一失败回到带错因位集的修补阶段；没有关联变式时停在 `awaiting_variant`，不会毕业。`plan_session_v5` 固定优先修补、到期、验证、新学，超载时保留关键到期任务并报告复习债。
 
 v3 新增 `review_memory_v3` 与 `review_math_v3`，并保留全部 v1/v2 符号用于历史回放。
 每次 v3 决策记录算法版本、独立参数版本和决策标志；408 与数学参数不共用版本号。

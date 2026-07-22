@@ -4,7 +4,7 @@ import { util } from '@kit.ArkTS';
 import reviewfault from 'libreviewfault.so';
 
 const DATABASE_NAME = 'reviewfault.db';
-const SCHEMA_VERSION = 4;
+const SCHEMA_VERSION = 5;
 
 export interface DashboardSummary {
   overdue: number; dueToday: number; newItems: number;
@@ -19,6 +19,33 @@ export interface StudyItem {
   id: string; kind: string; subject: string; state: number; difficulty: number;
   stabilityDays: number; dueAt: number; lastReviewedAt: number; repetitions: number;
   lapses: number; masteryLevel: number; fluentStreak: number; prompt: string; answer: string;
+  templateType: string; hints: string[]; answerPoints: string[]; profile: CardProfile; tags: string[];
+}
+export interface CardProfile {
+  archetype: string; knowledgePoint: string; sourceType: string; sourceTitle: string;
+  sourceChapter: string; sourceLocator: string; sourceYear?: number; mechanism: string; conditions: string;
+  contrast: string; example: string; commonTrap: string; transferPrompt: string; mnemonic: string;
+  firstAttempt: string; errorTrigger: string; generalMethod: string; verification: string;
+  targetSeconds?: number; structuredPayload: string;
+}
+export interface MemoryCardDraft {
+  templateType: string; archetype: string; subject: string; knowledgePoint: string;
+  prompt: string; answer: string; hints: string[]; answerPoints: string[];
+  mechanism: string; conditions: string; contrast: string; example: string;
+  commonTrap: string; transferPrompt: string; mnemonic: string; structuredPayload: string;
+  sourceType: string; sourceTitle: string; sourceChapter: string; sourceLocator: string;
+  sourceYear?: number; tags: string[];
+}
+export interface MathErrorDraft {
+  knowledgePoint: string; prompt: string; solution: string; firstAttempt: string;
+  errorTrigger: string; errorReason?: string; keyHint: string; generalMethod: string;
+  verification: string; transferPrompt: string; targetSeconds?: number;
+  sourceType: string; sourceTitle: string; sourceChapter: string; sourceLocator: string;
+  sourceYear?: number; tags: string[];
+}
+export interface ReviewEvidence {
+  hintLevel: number; answerRevealed: boolean; confidence: number; reflection: string;
+  pointHits?: number; pointCount?: number;
 }
 export interface SyncIdentity {
   deviceId: string; workspaceId: string; cursor: number; pendingCount: number;
@@ -146,18 +173,51 @@ export class LocalDatabase {
       i.difficulty, i.stability_days, i.due_at, i.last_reviewed_at, i.repetitions, i.lapses,
       COALESCE(ms.mastery_level, 0), COALESCE(ms.fluent_streak, 0),
       COALESCE(m.prompt_markdown, p.prompt_markdown, ''),
-      COALESCE(m.answer_markdown, p.solution_markdown, '')
+      COALESCE(m.answer_markdown, p.solution_markdown, ''), COALESCE(m.template_type, ''),
+      CASE WHEN m.hints_json IS NOT NULL THEN m.hints_json
+        WHEN trim(COALESCE(p.key_hint_markdown, '')) <> '' THEN json_array(p.key_hint_markdown) ELSE '[]' END,
+      COALESCE(m.answer_points_json, '[]'),
+      COALESCE(cp.archetype, CASE WHEN i.kind = 'math_problem' THEN 'math_error' ELSE 'qa' END),
+      COALESCE(cp.knowledge_point, ''), COALESCE(cp.source_type, 'notes'),
+      COALESCE(NULLIF(cp.source_title, ''), p.source_name, ''), COALESCE(cp.source_chapter, ''),
+      COALESCE(cp.source_locator, ''), COALESCE(cp.mechanism_markdown, ''),
+      COALESCE(cp.conditions_markdown, ''), COALESCE(cp.contrast_markdown, ''),
+      COALESCE(cp.example_markdown, ''), COALESCE(cp.common_trap_markdown, ''),
+      COALESCE(cp.transfer_prompt_markdown, ''), COALESCE(cp.mnemonic, ''),
+      COALESCE(NULLIF(cp.first_attempt_markdown, ''), p.wrong_step_markdown, ''),
+      COALESCE(cp.error_trigger_markdown, ''), COALESCE(cp.general_method_markdown, ''),
+      COALESCE(cp.verification_markdown, ''),
+      COALESCE((SELECT json_group_array(tag_name) FROM (SELECT t.name AS tag_name
+        FROM study_item_tag sit JOIN tag t ON t.id = sit.tag_id WHERE sit.study_item_id = i.id
+        AND t.deleted_at IS NULL ORDER BY t.name)), '[]'),
+      COALESCE(cp.source_year, 0), COALESCE(cp.target_seconds, 0),
+      COALESCE(cp.structured_payload_json, '{}')
       FROM study_item i LEFT JOIN math_schedule_state ms ON ms.study_item_id = i.id
       LEFT JOIN memory_card m ON m.study_item_id = i.id LEFT JOIN math_problem p ON p.study_item_id = i.id
-      WHERE i.deleted_at IS NULL AND (m.prompt_markdown LIKE ? OR m.answer_markdown LIKE ? OR p.source_name LIKE ?)
-      ORDER BY i.updated_at DESC LIMIT 200`, [pattern, pattern, pattern]);
+      LEFT JOIN card_profile_v5 cp ON cp.study_item_id = i.id
+      WHERE i.deleted_at IS NULL AND (m.prompt_markdown LIKE ? OR m.answer_markdown LIKE ?
+        OR p.source_name LIKE ? OR cp.knowledge_point LIKE ? OR cp.source_title LIKE ?
+        OR EXISTS (SELECT 1 FROM study_item_tag qit JOIN tag qt ON qt.id = qit.tag_id
+          WHERE qit.study_item_id = i.id AND qt.name LIKE ?))
+      ORDER BY i.updated_at DESC LIMIT 200`, [pattern, pattern, pattern, pattern, pattern, pattern]);
     const values: StudyItem[] = [];
     try { if (result.goToFirstRow()) do {
       values.push({ id: result.getString(0), kind: result.getString(1), subject: result.getString(2),
         state: result.getLong(3), difficulty: result.getDouble(4), stabilityDays: result.getDouble(5),
         dueAt: result.getLong(6), lastReviewedAt: result.getLong(7), repetitions: result.getLong(8),
         lapses: result.getLong(9), masteryLevel: result.getLong(10), fluentStreak: result.getLong(11),
-        prompt: result.getString(12), answer: result.getString(13) });
+        prompt: result.getString(12), answer: result.getString(13), templateType: result.getString(14),
+        hints: this.strings(result.getString(15)), answerPoints: this.strings(result.getString(16)),
+        profile: { archetype: result.getString(17), knowledgePoint: result.getString(18),
+          sourceType: result.getString(19), sourceTitle: result.getString(20), sourceChapter: result.getString(21),
+          sourceLocator: result.getString(22), mechanism: result.getString(23), conditions: result.getString(24),
+          contrast: result.getString(25), example: result.getString(26), commonTrap: result.getString(27),
+          transferPrompt: result.getString(28), mnemonic: result.getString(29), firstAttempt: result.getString(30),
+          errorTrigger: result.getString(31), generalMethod: result.getString(32), verification: result.getString(33),
+          sourceYear: result.getLong(35) > 0 ? result.getLong(35) : undefined,
+          targetSeconds: result.getLong(36) > 0 ? result.getLong(36) : undefined,
+          structuredPayload: result.getString(37) },
+        tags: this.strings(result.getString(34)) });
     } while (result.goToNextRow()); } finally { result.close(); }
     return values;
   }
@@ -169,21 +229,91 @@ export class LocalDatabase {
   }
 
   async createMemoryCard(prompt: string, answer: string): Promise<string> {
-    if (prompt.trim().length === 0 || answer.trim().length === 0) throw new Error('题干和答案不能为空');
+    return this.createScientificMemoryCard({ templateType: 'qa', archetype: 'qa',
+      subject: 'operating_systems', knowledgePoint: '未分类', prompt, answer, hints: [], answerPoints: [answer],
+      mechanism: '', conditions: '', contrast: '', example: '', commonTrap: '', transferPrompt: '',
+      mnemonic: '', structuredPayload: '{}', sourceType: 'notes', sourceTitle: '', sourceChapter: '',
+      sourceLocator: '', tags: [] });
+  }
+
+  async createScientificMemoryCard(draft: MemoryCardDraft): Promise<string> {
+    const resolvedAnswer = draft.answer.trim().length > 0 ? draft.answer.trim() : draft.answerPoints.join('\n');
+    if (draft.prompt.trim().length === 0 || resolvedAnswer.length === 0)
+      throw new Error('回忆问题和核心答案不能为空');
+    if (draft.knowledgePoint.trim().length === 0) throw new Error('考点 / 知识点不能为空');
+    if (draft.answerPoints.length === 0) throw new Error('至少需要一个评分要点');
+    if (['scale_mapping', 'enumeration', 'process'].includes(draft.archetype) && draft.answerPoints.length < 2)
+      throw new Error('该知识形式至少需要两个评分要点');
+    if (draft.archetype === 'formula_rule' && draft.conditions.trim().length === 0)
+      throw new Error('公式规则卡需要适用条件与边界');
+    const payload = JSON.parse(draft.structuredPayload || '{}') as Object;
+    if (payload === null || typeof payload !== 'object') throw new Error('结构化字段格式无效');
     const store = await this.open(); const id = util.generateRandomUUID(true); const now = this.now();
     store.beginTransaction();
     try {
       await store.executeSql(`INSERT INTO study_item (id, kind, subject, created_at, updated_at)
-        VALUES (?, 'memory_card', 'operating_systems', ?, ?)`, [id, now, now]);
+        VALUES (?, 'memory_card', ?, ?, ?)`, [id, draft.subject, now, now]);
+      await store.executeSql(`INSERT INTO card_profile_v5 (study_item_id, archetype, knowledge_point,
+        source_type, source_title, source_chapter, source_locator, source_year, mechanism_markdown,
+        conditions_markdown, contrast_markdown, example_markdown, common_trap_markdown,
+        transfer_prompt_markdown, mnemonic, structured_payload_json, created_at, updated_at)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`, [id, draft.archetype,
+        draft.knowledgePoint.trim(), draft.sourceType, draft.sourceTitle.trim(), draft.sourceChapter.trim(),
+        draft.sourceLocator.trim(), draft.sourceYear ?? null, draft.mechanism.trim(), draft.conditions.trim(),
+        draft.contrast.trim(), draft.example.trim(), draft.commonTrap.trim(), draft.transferPrompt.trim(),
+        draft.mnemonic.trim(), draft.structuredPayload || '{}', now, now]);
       await store.executeSql(`INSERT INTO memory_card (study_item_id, template_type, prompt_markdown,
-        answer_markdown, hints_json, answer_points_json) VALUES (?, 'qa', ?, ?, '[]', '[]')`,
-        [id, prompt.trim(), answer.trim()]);
+        answer_markdown, hints_json, answer_points_json) VALUES (?, ?, ?, ?, ?, ?)`,
+        [id, draft.templateType, draft.prompt.trim(), resolvedAnswer, JSON.stringify(draft.hints),
+          JSON.stringify(draft.answerPoints)]);
+      await this.replaceTagsInTransaction(store, id, draft.tags, now);
       store.commit(); return id;
     } catch (error) { store.rollBack(); throw error; }
   }
 
-  async review(item: StudyItem, feedback: number, durationSeconds: number): Promise<number> {
+  async createMathError(draft: MathErrorDraft): Promise<string> {
+    const sourceTypes = ['textbook', 'course', 'past_exam', 'practice', 'notes', 'other'];
+    const reasons = ['concept', 'approach', 'calculation', 'misread', 'forgotten_fact', 'timeout', 'other'];
+    if (draft.knowledgePoint.trim().length === 0) throw new Error('考点 / 知识点不能为空');
+    if (draft.prompt.trim().length === 0) throw new Error('错题题面不能为空');
+    if (!sourceTypes.includes(draft.sourceType) ||
+      (draft.sourceYear !== undefined && (draft.sourceYear < 1900 || draft.sourceYear > 2200)) ||
+      (draft.errorReason !== undefined && !reasons.includes(draft.errorReason)) ||
+      (draft.targetSeconds !== undefined && (draft.targetSeconds < 10 || draft.targetSeconds > 7200)))
+      throw new Error('错题来源、年份、错因或目标用时无效');
+    const store = await this.open(); const id = util.generateRandomUUID(true); const now = this.now();
+    store.beginTransaction();
+    try {
+      await store.executeSql(`INSERT INTO study_item (id, kind, subject, created_at, updated_at)
+        VALUES (?, 'math_problem', 'math', ?, ?)`, [id, now, now]);
+      await store.executeSql(`INSERT INTO card_profile_v5 (study_item_id, archetype, knowledge_point,
+        source_type, source_title, source_chapter, source_locator, source_year, first_attempt_markdown,
+        error_trigger_markdown, general_method_markdown, verification_markdown, transfer_prompt_markdown,
+        target_seconds, structured_payload_json, created_at, updated_at)
+        VALUES (?, 'math_error', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, '{}', ?, ?)`, [id,
+        draft.knowledgePoint.trim(), draft.sourceType, draft.sourceTitle.trim(), draft.sourceChapter.trim(),
+        draft.sourceLocator.trim(), draft.sourceYear ?? null, draft.firstAttempt.trim(), draft.errorTrigger.trim(),
+        draft.generalMethod.trim(), draft.verification.trim(), draft.transferPrompt.trim(),
+        draft.targetSeconds ?? null, now, now]);
+      await store.executeSql(`INSERT INTO math_problem (study_item_id, source_name, source_page, source_year,
+        prompt_markdown, solution_markdown, wrong_step_markdown, key_hint_markdown, default_error_reason)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`, [id, draft.sourceTitle.trim(), draft.sourceLocator.trim(),
+        draft.sourceYear ?? null, draft.prompt.trim(), draft.solution.trim(), draft.firstAttempt.trim(),
+        draft.keyHint.trim(), draft.errorReason ?? null]);
+      await this.replaceTagsInTransaction(store, id, draft.tags, now);
+      store.commit(); return id;
+    } catch (error) { store.rollBack(); throw error; }
+  }
+
+  async review(item: StudyItem, feedback: number, durationSeconds: number,
+    evidence?: ReviewEvidence): Promise<number> {
     const store = await this.open(); const reviewedAt = this.now();
+    const proof: ReviewEvidence = evidence ?? { hintLevel: 0, answerRevealed: false,
+      confidence: 3, reflection: '' };
+    if (proof.hintLevel < 0 || proof.hintLevel > 9 || proof.confidence < 1 || proof.confidence > 5 ||
+      (proof.pointHits === undefined) !== (proof.pointCount === undefined) ||
+      (proof.pointCount !== undefined && (proof.pointCount <= 0 || (proof.pointHits ?? 0) > proof.pointCount)))
+      throw new Error('复习证据无效');
     let dueAt = 0; let appliedFeedback = feedback; let nextState = item.state;
     let difficulty = item.difficulty; let stability = item.stabilityDays;
     let mastery = item.masteryLevel; let streak = item.fluentStreak;
@@ -198,7 +328,8 @@ export class LocalDatabase {
     } else {
       const value = reviewfault.reviewMathV3({ masteryLevel: item.masteryLevel, fluentStreak: item.fluentStreak,
         dueAt: item.dueAt, lastReviewedAt: item.lastReviewedAt, repetitions: item.repetitions,
-        feedback, errorReason: 0, hintRevealed: 0, intensity: 1, reviewedAt,
+        feedback, errorReason: 0, hintRevealed: proof.hintLevel > 0 || proof.answerRevealed ? 1 : 0,
+        intensity: 1, reviewedAt,
         durationSeconds, durationQuality: durationSeconds < 5 ? 2 : 1, consecutiveFailures: 0 });
       dueAt = value.dueAt; appliedFeedback = value.appliedFeedback; mastery = value.masteryLevel;
       streak = value.fluentStreak; repetitions = value.repetitions; stability = value.scheduledDays;
@@ -224,13 +355,38 @@ export class LocalDatabase {
       const algorithm = item.kind === 'memory_card' ? 'memory_fsrs_6' : 'math_mastery_ladder';
       await store.executeSql(`INSERT INTO review_action_v4 (action_id, study_item_id, algorithm, feedback,
         reviewed_at, duration_seconds, hint_revealed, device_id, device_counter, causal_cursor,
-        source_generation, created_at) VALUES (?, ?, ?, ?, ?, ?, 0, ?, ?, ?, 4, ?)`,
+        source_generation, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 4, ?)`,
         [actionId, item.id, algorithm, appliedFeedback, reviewedAt, durationSeconds,
+          proof.hintLevel > 0 || proof.answerRevealed ? 1 : 0,
           identity.deviceId, identity.counter, identity.cursor, reviewedAt]);
       await this.insertOutbox(store, identity, 'reviewAction', actionId, 'create', { studyItemId: item.id,
-        algorithm, feedback: appliedFeedback, reviewedAt, durationSeconds, hintRevealed: false }, reviewedAt);
+        algorithm, feedback: appliedFeedback, reviewedAt, durationSeconds,
+        hintRevealed: proof.hintLevel > 0 || proof.answerRevealed }, reviewedAt);
       await store.executeSql(`UPDATE schedule_cache_v4 SET due_at = ?, replayed_action_count = ?,
         dirty = 0, rebuilt_at = ? WHERE study_item_id = ?`, [dueAt, item.repetitions + 1, reviewedAt, item.id]);
+      const taskQuery = await store.querySql(`SELECT id, task_type, repetitions, consecutive_failures
+        FROM learning_task_v5 WHERE source_study_item_id = ? AND task_state IN ('active', 'legacy')
+        AND dependency_ready = 1 ORDER BY due_at, id LIMIT 1`, [item.id]);
+      if (taskQuery.goToFirstRow()) {
+        const taskId = taskQuery.getString(0); const taskType = taskQuery.getString(1);
+        const taskRepetitions = taskQuery.getLong(2); const failures = taskQuery.getLong(3);
+        const correct = item.kind === 'memory_card' ? appliedFeedback >= 3 : appliedFeedback >= 2;
+        await store.executeSql(`UPDATE learning_task_v5 SET task_state = 'active', due_at = ?,
+          last_reviewed_at = ?, repetitions = ?, consecutive_failures = ?, updated_at = ? WHERE id = ?`,
+          [dueAt, reviewedAt, taskRepetitions + 1, correct ? 0 : failures + 1, reviewedAt, taskId]);
+        const device = await store.querySql('SELECT device_id, next_counter FROM local_device WHERE singleton = 1');
+        if (device.goToFirstRow()) await store.executeSql(`INSERT INTO learning_evidence_v5
+          (evidence_id, learning_task_id, task_type, reviewed_at, correct, point_hits, point_count,
+          hint_level, answer_revealed, duration_seconds, duration_reliable, confidence,
+          reflection_markdown, device_id, device_counter, created_at)
+          VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`, [util.generateRandomUUID(true),
+          taskId, taskType, reviewedAt, correct ? 1 : 0, proof.pointHits ?? null, proof.pointCount ?? null,
+          proof.hintLevel, proof.answerRevealed ? 1 : 0, durationSeconds,
+          durationSeconds >= 5 && durationSeconds <= 3600 ? 1 : 0, proof.confidence,
+          proof.reflection.trim(), device.getString(0), device.getLong(1), reviewedAt]);
+        device.close();
+      }
+      taskQuery.close();
       store.commit(); return dueAt;
     } catch (error) { store.rollBack(); throw error; }
   }
@@ -284,10 +440,12 @@ export class LocalDatabase {
         if (operation.entityType === 'studyItem') await this.applyStudyItem(store, operation);
         else if (operation.entityType === 'memoryCard') await this.applyMemoryCard(store, operation);
         else if (operation.entityType === 'mathProblem') await this.applyMathProblem(store, operation);
+        else if (operation.entityType === 'cardProfile') await this.applyCardProfile(store, operation);
         else if (operation.entityType === 'tag') await this.applyTag(store, operation);
         else if (operation.entityType === 'relation') await this.applyRelation(store, operation);
         else if (operation.entityType === 'learningPreferences') await this.applyLearningPreferences(store, operation);
         else if (operation.entityType === 'reviewAction') await this.applyReviewAction(store, operation);
+        else if (operation.entityType === 'learningEvidence') await this.applyLearningEvidence(store, operation);
         await store.executeSql(`DELETE FROM sync_outbox WHERE device_id =
           (SELECT device_id FROM local_device WHERE singleton = 1) AND device_counter >= ?`,
           [remoteApplyCounterStart]);
@@ -380,6 +538,69 @@ export class LocalDatabase {
         Boolean(fields['hintRevealed'] ?? false) ? 1 : 0, operation.deviceId, operation.deviceCounter,
         operation.serverSeq, operation.occurredAt]);
     await store.executeSql('UPDATE schedule_cache_v4 SET dirty = 1 WHERE study_item_id = ?', [itemId]);
+  }
+
+  private async applyLearningEvidence(store: relationalStore.RdbStore, operation: PulledOperation): Promise<void> {
+    const fields = operation.changedFields; const taskId = String(fields['taskId'] ?? '');
+    if (taskId.length === 0) return;
+    await store.executeSql(`INSERT OR IGNORE INTO learning_evidence_v5 (evidence_id, learning_task_id,
+      task_type, reviewed_at, correct, error_mask, point_hits, point_count, hint_level, answer_revealed,
+      duration_seconds, duration_reliable, confidence, reflection_markdown, artifact_id, device_id,
+      device_counter, causal_cursor, created_at)
+      SELECT ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?
+      WHERE EXISTS (SELECT 1 FROM learning_task_v5 WHERE id = ?)`, [operation.entityId, taskId,
+      String(fields['taskType'] ?? 'memory_recall'), Number(fields['reviewedAt'] ?? operation.occurredAt),
+      Number(fields['correct'] ?? 0), Number(fields['errorMask'] ?? 0), fields['pointHits'] ?? null,
+      fields['pointCount'] ?? null, Number(fields['hintLevel'] ?? 0), Number(fields['answerRevealed'] ?? 0),
+      fields['durationSeconds'] ?? null, Number(fields['durationReliable'] ?? 1), fields['confidence'] ?? null,
+      String(fields['reflection'] ?? ''), fields['artifactId'] ?? null, operation.deviceId,
+      operation.deviceCounter, operation.serverSeq, operation.occurredAt, taskId]);
+  }
+
+  private async applyCardProfile(store: relationalStore.RdbStore, operation: PulledOperation): Promise<void> {
+    const fields = operation.changedFields;
+    const check = await store.querySql('SELECT COUNT(*) FROM card_profile_v5 WHERE study_item_id = ?',
+      [operation.entityId]);
+    let exists = false;
+    try { exists = check.goToFirstRow() && check.getLong(0) > 0; } finally { check.close(); }
+    if (!exists) await store.executeSql(`INSERT INTO card_profile_v5 (study_item_id, archetype,
+      knowledge_point, source_type, source_title, source_chapter, source_locator, source_year,
+      mechanism_markdown, conditions_markdown, contrast_markdown, example_markdown,
+      common_trap_markdown, transfer_prompt_markdown, mnemonic, first_attempt_markdown,
+      error_trigger_markdown, general_method_markdown, verification_markdown, target_seconds,
+      structured_payload_json, created_at, updated_at)
+      SELECT ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?
+      WHERE EXISTS (SELECT 1 FROM study_item WHERE id = ?)`, [operation.entityId,
+      String(fields['archetype'] ?? 'qa'), String(fields['knowledgePoint'] ?? ''),
+      String(fields['sourceType'] ?? 'notes'), String(fields['sourceTitle'] ?? ''),
+      String(fields['sourceChapter'] ?? ''), String(fields['sourceLocator'] ?? ''), fields['sourceYear'] ?? null,
+      String(fields['mechanism'] ?? ''), String(fields['conditions'] ?? ''), String(fields['contrast'] ?? ''),
+      String(fields['example'] ?? ''), String(fields['commonTrap'] ?? ''), String(fields['transferPrompt'] ?? ''),
+      String(fields['mnemonic'] ?? ''), String(fields['firstAttempt'] ?? ''),
+      String(fields['errorTrigger'] ?? ''), String(fields['generalMethod'] ?? ''),
+      String(fields['verification'] ?? ''), fields['targetSeconds'] ?? null,
+      JSON.stringify(fields['structuredPayload'] ?? {}), operation.occurredAt, operation.occurredAt,
+      operation.entityId]);
+    const mappings: Array<{wire: string, column: string}> = [
+      { wire: 'archetype', column: 'archetype' }, { wire: 'knowledgePoint', column: 'knowledge_point' },
+      { wire: 'sourceType', column: 'source_type' }, { wire: 'sourceTitle', column: 'source_title' },
+      { wire: 'sourceChapter', column: 'source_chapter' }, { wire: 'sourceLocator', column: 'source_locator' },
+      { wire: 'sourceYear', column: 'source_year' }, { wire: 'mechanism', column: 'mechanism_markdown' },
+      { wire: 'conditions', column: 'conditions_markdown' }, { wire: 'contrast', column: 'contrast_markdown' },
+      { wire: 'example', column: 'example_markdown' }, { wire: 'commonTrap', column: 'common_trap_markdown' },
+      { wire: 'transferPrompt', column: 'transfer_prompt_markdown' }, { wire: 'mnemonic', column: 'mnemonic' },
+      { wire: 'firstAttempt', column: 'first_attempt_markdown' },
+      { wire: 'errorTrigger', column: 'error_trigger_markdown' },
+      { wire: 'generalMethod', column: 'general_method_markdown' },
+      { wire: 'verification', column: 'verification_markdown' },
+      { wire: 'targetSeconds', column: 'target_seconds' },
+    ];
+    for (const mapping of mappings) if (fields[mapping.wire] !== undefined) await store.executeSql(
+      `UPDATE card_profile_v5 SET ${mapping.column} = ?, updated_at = ? WHERE study_item_id = ?`,
+      [fields[mapping.wire], operation.occurredAt, operation.entityId]);
+    if (fields['structuredPayload'] !== undefined) await store.executeSql(
+      'UPDATE card_profile_v5 SET structured_payload_json = ?, updated_at = ? WHERE study_item_id = ?',
+      [JSON.stringify(fields['structuredPayload']), operation.occurredAt, operation.entityId]);
   }
 
   private async applyMemoryCard(store: relationalStore.RdbStore, operation: PulledOperation): Promise<void> {
@@ -540,6 +761,34 @@ export class LocalDatabase {
   private errorReason(value: string): number { return ['','concept','approach','calculation','misread',
     'forgotten_fact','timeout','other'].indexOf(value); }
 
+  private strings(value: string): string[] {
+    try { const parsed = JSON.parse(value) as string[]; return Array.isArray(parsed) ? parsed : []; }
+    catch (_) { return []; }
+  }
+
+  private async replaceTagsInTransaction(store: relationalStore.RdbStore, itemId: string,
+    names: string[], now: number): Promise<void> {
+    await store.executeSql('DELETE FROM study_item_tag WHERE study_item_id = ?', [itemId]);
+    const normalized: string[] = [];
+    names.map(value => value.trim()).filter(value => value.length > 0).forEach(value => {
+      if (!normalized.some(existing => existing.toLowerCase() === value.toLowerCase())) normalized.push(value);
+    });
+    for (const name of normalized.slice(0, 30)) {
+      if (name.length > 60) throw new Error('单个标签不能超过 60 个字符');
+      const candidate = util.generateRandomUUID(true);
+      await store.executeSql(`INSERT OR IGNORE INTO tag (id, name, created_at, updated_at)
+        VALUES (?, ?, ?, ?)`, [candidate, name, now, now]);
+      await store.executeSql(`UPDATE tag SET deleted_at = NULL, updated_at = ?
+        WHERE name = ? COLLATE NOCASE`, [now, name]);
+      const query = await store.querySql('SELECT id FROM tag WHERE name = ? COLLATE NOCASE', [name]);
+      let tagId = candidate;
+      try { if (query.goToFirstRow()) tagId = query.getString(0); } finally { query.close(); }
+      await this.enqueue(store, 'tag', tagId, 'create', { name }, now);
+      await store.executeSql('INSERT OR IGNORE INTO study_item_tag (study_item_id, tag_id) VALUES (?, ?)',
+        [itemId, tagId]);
+    }
+  }
+
   private async enqueue(store: relationalStore.RdbStore, type: string, id: string, action: string,
     fields: Record<string, Object>, occurredAt: number): Promise<void> {
     const identity = await this.counter(store); await this.insertOutbox(store, identity, type, id, action, fields, occurredAt);
@@ -565,7 +814,7 @@ export class LocalDatabase {
     try { return result.goToFirstRow() ? result.getLong(0) : 0; } finally { result.close(); }
   }
   private async applyMigration(store: relationalStore.RdbStore, version: number): Promise<void> {
-    const names = ['', '001_initial.sql', '002_v0_2.sql', '003_v0_3.sql', '004_v0_4.sql'];
+    const names = ['', '001_initial.sql', '002_v0_2.sql', '003_v0_3.sql', '004_v0_4.sql', '005_v0_5.sql'];
     const bytes = await this.context.resourceManager.getRawFileContent(`contracts/${names[version]}`);
     const script = new TextDecoder().decode(bytes); store.beginTransaction();
     try { for (const statement of this.statements(script)) await store.executeSql(statement);
@@ -579,7 +828,7 @@ export class LocalDatabase {
         line.toUpperCase().startsWith('PRAGMA USER_VERSION') || line.toUpperCase() === 'BEGIN IMMEDIATE;' ||
         line.toUpperCase() === 'COMMIT;') continue;
       if (line.toUpperCase().startsWith('CREATE TRIGGER')) trigger = true; current += `${raw}\n`;
-      const complete = trigger ? line.toUpperCase() === 'END;' : line.endsWith(';');
+      const complete = trigger ? line.toUpperCase().endsWith('END;') : line.endsWith(';');
       if (complete) { result.push(current.trim().replace(/;$/, '')); current = ''; trigger = false; }
     }
     if (current.trim().length > 0) throw new Error('Incomplete schema migration'); return result;

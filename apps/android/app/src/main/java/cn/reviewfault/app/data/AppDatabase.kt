@@ -48,8 +48,81 @@ data class StudyRow(
     val answer: String,
     val mediaPath: String?,
     val templateType: String,
-    val structuredJson: String,
+    val hints: List<String>,
+    val answerPoints: List<String>,
+    val profile: CardProfile,
+    val tags: List<String>,
 )
+
+data class CardProfile(
+    val archetype: String = "qa",
+    val knowledgePoint: String = "",
+    val sourceType: String = "notes",
+    val sourceTitle: String = "",
+    val sourceChapter: String = "",
+    val sourceLocator: String = "",
+    val sourceYear: Int? = null,
+    val mechanism: String = "",
+    val conditions: String = "",
+    val contrast: String = "",
+    val example: String = "",
+    val commonTrap: String = "",
+    val transferPrompt: String = "",
+    val mnemonic: String = "",
+    val firstAttempt: String = "",
+    val errorTrigger: String = "",
+    val generalMethod: String = "",
+    val verification: String = "",
+    val targetSeconds: Int? = null,
+    val structuredPayload: String = "{}",
+)
+
+data class MemoryCardDraft(
+    val templateType: String,
+    val archetype: String,
+    val subject: String,
+    val knowledgePoint: String,
+    val prompt: String,
+    val answer: String,
+    val hints: List<String> = emptyList(),
+    val answerPoints: List<String> = emptyList(),
+    val mechanism: String = "",
+    val conditions: String = "",
+    val contrast: String = "",
+    val example: String = "",
+    val commonTrap: String = "",
+    val transferPrompt: String = "",
+    val mnemonic: String = "",
+    val structuredPayload: String = "{}",
+    val sourceType: String = "notes",
+    val sourceTitle: String = "",
+    val sourceChapter: String = "",
+    val sourceLocator: String = "",
+    val sourceYear: Int? = null,
+    val tags: List<String> = emptyList(),
+)
+
+data class MathErrorDraft(
+    val knowledgePoint: String = "",
+    val sourceType: String = "practice",
+    val sourceTitle: String = "",
+    val sourceChapter: String = "",
+    val sourceLocator: String = "",
+    val sourceYear: Int? = null,
+    val prompt: String = "",
+    val solution: String = "",
+    val firstAttempt: String = "",
+    val errorTrigger: String = "",
+    val errorReason: String? = null,
+    val keyHint: String = "",
+    val generalMethod: String = "",
+    val verification: String = "",
+    val transferPrompt: String = "",
+    val targetSeconds: Int? = null,
+    val tags: List<String> = emptyList(),
+)
+
+data class TagRow(val id: String, val name: String, val itemCount: Int)
 
 data class DashboardSummary(
     val overdue: Int,
@@ -121,9 +194,12 @@ data class MissingMediaObject(val sha256: String, val file: File)
 private data class AttemptSyncFact(
     val startedAt: Long, val finishedAt: Long, val result: String, val errorReason: String?,
 )
+private data class EvidenceTaskTarget(
+    val id: String, val type: String, val repetitions: Int, val consecutiveFailures: Int,
+)
 
 class AppDatabase private constructor(context: Context) :
-    SQLiteOpenHelper(context, "reviewfault.db", null, 4) {
+    SQLiteOpenHelper(context, "reviewfault.db", null, 5) {
     // v1 review_log is intentionally read-only and is consulted only by lazy history replay.
     // v3 parameter checksums are foreign-keyed to algorithm_parameter_registry.
 
@@ -145,6 +221,7 @@ class AppDatabase private constructor(context: Context) :
         applyMigration(db, "002_v0_2.sql")
         applyMigration(db, "003_v0_3.sql")
         applyMigration(db, "004_v0_4.sql")
+        applyMigration(db, "005_v0_5.sql")
         ensureLocalDevice(db)
     }
 
@@ -162,13 +239,17 @@ class AppDatabase private constructor(context: Context) :
             applyMigration(db, "004_v0_4.sql")
             current = 4
         }
+        if (current < 5 && newVersion >= 5) {
+            applyMigration(db, "005_v0_5.sql")
+            current = 5
+        }
         ensureLocalDevice(db)
         check(current == newVersion) { "缺少数据库迁移：$oldVersion -> $newVersion" }
     }
 
     override fun onOpen(db: SQLiteDatabase) {
         super.onOpen(db)
-        if (db.version == 4 && !db.isReadOnly) ensureLocalDevice(db)
+        if (db.version == 5 && !db.isReadOnly) ensureLocalDevice(db)
     }
 
     private fun ensureLocalDevice(db: SQLiteDatabase) {
@@ -285,11 +366,13 @@ class AppDatabase private constructor(context: Context) :
                     "studyItem" -> applyRemoteStudyItem(operation)
                     "memoryCard" -> applyRemoteMemoryCard(operation)
                     "mathProblem" -> applyRemoteMathProblem(operation)
+                    "cardProfile" -> applyRemoteCardProfile(operation)
                     "tag" -> applyRemoteTag(operation)
                     "relation" -> applyRemoteRelation(operation)
                     "learningPreferences" -> applyRemoteLearningPreferences(operation)
                     "attemptArtifact" -> applyRemoteAttemptArtifact(operation)
                     "reviewAction" -> applyRemoteReviewAction(operation)
+                    "learningEvidence" -> applyRemoteLearningEvidence(operation)
                     // Artifact bytes are transferred by the media loop. Retaining its revision here
                     // prevents a metadata-only pull from being mistaken for a missing operation.
                 }
@@ -653,6 +736,66 @@ class AppDatabase private constructor(context: Context) :
         execSQL("UPDATE schedule_cache_v4 SET dirty = 1 WHERE study_item_id = ?", arrayOf(itemId))
     }
 
+    private fun SQLiteDatabase.applyRemoteLearningEvidence(operation: PulledOperation) {
+        val fields = operation.changedFields
+        val taskId = fields.optString("taskId")
+        if (taskId.isBlank() || !rawQuery("SELECT 1 FROM learning_task_v5 WHERE id = ?", arrayOf(taskId))
+                .use(Cursor::moveToFirst)) return
+        insertWithOnConflict("learning_evidence_v5", null, ContentValues().apply {
+            put("evidence_id", operation.entityId); put("learning_task_id", taskId)
+            put("task_type", fields.optString("taskType", "memory_recall"))
+            put("reviewed_at", fields.optLong("reviewedAt", operation.occurredAt))
+            put("correct", if (fields.optBoolean("correct")) 1 else 0)
+            put("error_mask", fields.optInt("errorMask", 0)); put("hint_level", fields.optInt("hintLevel", 0))
+            put("answer_revealed", if (fields.optBoolean("answerRevealed")) 1 else 0)
+            put("duration_reliable", if (fields.optBoolean("durationReliable", true)) 1 else 0)
+            fields.takeIf { it.has("pointHits") && !it.isNull("pointHits") }?.let { put("point_hits", it.getInt("pointHits")) }
+            fields.takeIf { it.has("pointCount") && !it.isNull("pointCount") }?.let { put("point_count", it.getInt("pointCount")) }
+            fields.takeIf { it.has("durationSeconds") && !it.isNull("durationSeconds") }?.let { put("duration_seconds", it.getInt("durationSeconds")) }
+            fields.takeIf { it.has("confidence") && !it.isNull("confidence") }?.let { put("confidence", it.getInt("confidence")) }
+            put("reflection_markdown", fields.optString("reflection")); put("device_id", operation.deviceId)
+            put("device_counter", operation.deviceCounter); put("causal_cursor", operation.serverSeq)
+            put("created_at", operation.occurredAt)
+        }, SQLiteDatabase.CONFLICT_IGNORE)
+    }
+
+    private fun SQLiteDatabase.applyRemoteCardProfile(operation: PulledOperation) {
+        if (!rawQuery("SELECT 1 FROM study_item WHERE id = ?", arrayOf(operation.entityId))
+                .use(Cursor::moveToFirst)) return
+        val fields = operation.changedFields
+        val values = ContentValues().apply {
+            put("archetype", fields.optString("archetype", "qa"))
+            put("knowledge_point", fields.optString("knowledgePoint"))
+            put("source_type", fields.optString("sourceType", "notes"))
+            put("source_title", fields.optString("sourceTitle"))
+            put("source_chapter", fields.optString("sourceChapter"))
+            put("source_locator", fields.optString("sourceLocator"))
+            if (fields.has("sourceYear") && !fields.isNull("sourceYear")) put("source_year", fields.getInt("sourceYear"))
+            else putNull("source_year")
+            put("mechanism_markdown", fields.optString("mechanism"))
+            put("conditions_markdown", fields.optString("conditions"))
+            put("contrast_markdown", fields.optString("contrast"))
+            put("example_markdown", fields.optString("example"))
+            put("common_trap_markdown", fields.optString("commonTrap"))
+            put("transfer_prompt_markdown", fields.optString("transferPrompt"))
+            put("mnemonic", fields.optString("mnemonic"))
+            put("first_attempt_markdown", fields.optString("firstAttempt"))
+            put("error_trigger_markdown", fields.optString("errorTrigger"))
+            put("general_method_markdown", fields.optString("generalMethod"))
+            put("verification_markdown", fields.optString("verification"))
+            if (fields.has("targetSeconds") && !fields.isNull("targetSeconds")) put("target_seconds", fields.getInt("targetSeconds"))
+            else putNull("target_seconds")
+            put("structured_payload_json", fields.opt("structuredPayload")?.toString() ?: "{}")
+            put("updated_at", operation.occurredAt)
+        }
+        val updated = update("card_profile_v5", values, "study_item_id = ?", arrayOf(operation.entityId))
+        if (updated == 0) {
+            values.put("study_item_id", operation.entityId)
+            values.put("created_at", operation.occurredAt)
+            insertOrThrow("card_profile_v5", null, values)
+        }
+    }
+
     private fun SQLiteDatabase.enqueueSync(
         entityType: String, entityId: String, action: String, fields: JSONObject, occurredAt: Long,
     ) {
@@ -884,18 +1027,11 @@ class AppDatabase private constructor(context: Context) :
             .toLocalDate().atStartOfDay(ZoneId.systemDefault()).toEpochSecond()
         readableDatabase.rawQuery(
             """
-            SELECT s.id, s.kind, s.subject, s.scheduler_state, s.difficulty,
-                   s.stability_days, s.due_at, s.last_reviewed_at,
-                   s.repetitions, s.lapses,
-                   COALESCE(m.prompt_markdown, p.prompt_markdown, ''),
-                   COALESCE(m.answer_markdown, p.solution_markdown, ''),
-                   media.relative_path, COALESCE(m.template_type, ''),
-                   CASE WHEN m.template_type = 'layered_hint' THEN m.hints_json
-                        WHEN m.template_type = 'enumeration' THEN m.answer_points_json
-                        ELSE '[]' END
+            SELECT $STUDY_ROW_COLUMNS
             FROM study_item s
             LEFT JOIN memory_card m ON m.study_item_id = s.id
             LEFT JOIN math_problem p ON p.study_item_id = s.id
+            LEFT JOIN card_profile_v5 cp ON cp.study_item_id = s.id
             LEFT JOIN math_problem_media pm
               ON pm.math_problem_id = s.id AND pm.role = 'prompt' AND pm.sort_order = 0
             LEFT JOIN media ON media.id = pm.media_id
@@ -979,24 +1115,23 @@ class AppDatabase private constructor(context: Context) :
         }
         clauses += "(? = '%%' OR COALESCE(m.prompt_markdown, p.prompt_markdown, '') LIKE ? ESCAPE '\\' " +
             "OR COALESCE(m.answer_markdown, p.solution_markdown, '') LIKE ? ESCAPE '\\' " +
-            "OR COALESCE(p.source_name, '') LIKE ? ESCAPE '\\')"
-        args += listOf(pattern, pattern, pattern, pattern)
+            "OR COALESCE(p.source_name, '') LIKE ? ESCAPE '\\' " +
+            "OR COALESCE(cp.knowledge_point, '') LIKE ? ESCAPE '\\' " +
+            "OR COALESCE(cp.source_title, '') LIKE ? ESCAPE '\\' " +
+            "OR COALESCE(cp.source_chapter, '') LIKE ? ESCAPE '\\' " +
+            "OR COALESCE(cp.source_locator, '') LIKE ? ESCAPE '\\' " +
+            "OR EXISTS (SELECT 1 FROM study_item_tag qit JOIN tag qt ON qt.id = qit.tag_id " +
+            "WHERE qit.study_item_id = s.id AND qt.name LIKE ? ESCAPE '\\'))"
+        args += List(9) { pattern }
         args += filter.limit.toString()
         args += filter.offset.toString()
         return readableDatabase.rawQuery(
             """
-            SELECT s.id, s.kind, s.subject, s.scheduler_state, s.difficulty,
-                   s.stability_days, s.due_at, s.last_reviewed_at,
-                   s.repetitions, s.lapses,
-                   COALESCE(m.prompt_markdown, p.prompt_markdown, ''),
-                   COALESCE(m.answer_markdown, p.solution_markdown, ''),
-                   media.relative_path, COALESCE(m.template_type, ''),
-                   CASE WHEN m.template_type = 'layered_hint' THEN m.hints_json
-                        WHEN m.template_type = 'enumeration' THEN m.answer_points_json
-                        ELSE '[]' END
+            SELECT $STUDY_ROW_COLUMNS
             FROM study_item s
             LEFT JOIN memory_card m ON m.study_item_id = s.id
             LEFT JOIN math_problem p ON p.study_item_id = s.id
+            LEFT JOIN card_profile_v5 cp ON cp.study_item_id = s.id
             LEFT JOIN math_problem_media pm
               ON pm.math_problem_id = s.id AND pm.role = 'prompt' AND pm.sort_order = 0
             LEFT JOIN media ON media.id = pm.media_id
@@ -1009,6 +1144,20 @@ class AppDatabase private constructor(context: Context) :
             while (cursor.moveToNext()) add(cursor.toStudyRow())
         } }
     }
+
+    fun tags(): List<TagRow> = readableDatabase.rawQuery(
+        """
+        SELECT t.id, t.name, COUNT(sit.study_item_id)
+        FROM tag t LEFT JOIN study_item_tag sit ON sit.tag_id = t.id
+        LEFT JOIN study_item s ON s.id = sit.study_item_id AND s.deleted_at IS NULL
+        WHERE t.deleted_at IS NULL
+        GROUP BY t.id, t.name HAVING COUNT(s.id) > 0
+        ORDER BY COUNT(s.id) DESC, t.name COLLATE NOCASE
+        LIMIT 100
+        """.trimIndent(), null,
+    ).use { cursor -> buildList {
+        while (cursor.moveToNext()) add(TagRow(cursor.getString(0), cursor.getString(1), cursor.getInt(2)))
+    } }
 
     fun learningPreferences(): LearningPreferences = readableDatabase.rawQuery(
         "SELECT * FROM learning_preferences WHERE singleton = 1", null,
@@ -1078,24 +1227,30 @@ class AppDatabase private constructor(context: Context) :
     }
 
     fun replaceTags(itemId: String, names: List<String>) {
-        val normalized = names.map(String::trim).filter(String::isNotEmpty).distinctBy { it.lowercase() }
         val now = Instant.now().epochSecond
         writableDatabase.inTransaction {
-            delete("study_item_tag", "study_item_id = ?", arrayOf(itemId))
-            normalized.forEach { name ->
-                val existing = rawQuery("SELECT id FROM tag WHERE name = ? COLLATE NOCASE", arrayOf(name))
-                    .use { if (it.moveToFirst()) it.getString(0) else null }
-                val tagId = existing ?: uuidV7().also { id ->
-                    insertOrThrow("tag", null, ContentValues().apply {
-                        put("id", id); put("name", name); put("created_at", now); put("updated_at", now)
-                    })
-                }
-                execSQL("UPDATE tag SET deleted_at = NULL, updated_at = ? WHERE id = ?", arrayOf<Any>(now, tagId))
-                enqueueSync("tag", tagId, "create", JSONObject().put("name", name), now)
-                insertOrThrow("study_item_tag", null, ContentValues().apply {
-                    put("study_item_id", itemId); put("tag_id", tagId)
+            replaceTagsInTransaction(itemId, names, now)
+        }
+    }
+
+    private fun SQLiteDatabase.replaceTagsInTransaction(itemId: String, names: List<String>, now: Long) {
+        val normalized = names.map(String::trim).filter(String::isNotEmpty)
+            .distinctBy { it.lowercase() }.take(30)
+        delete("study_item_tag", "study_item_id = ?", arrayOf(itemId))
+        normalized.forEach { name ->
+            require(name.length <= 60) { "单个标签不能超过 60 个字符" }
+            val existing = rawQuery("SELECT id FROM tag WHERE name = ? COLLATE NOCASE", arrayOf(name))
+                .use { if (it.moveToFirst()) it.getString(0) else null }
+            val tagId = existing ?: uuidV7().also { id ->
+                insertOrThrow("tag", null, ContentValues().apply {
+                    put("id", id); put("name", name); put("created_at", now); put("updated_at", now)
                 })
             }
+            execSQL("UPDATE tag SET deleted_at = NULL, updated_at = ? WHERE id = ?", arrayOf<Any>(now, tagId))
+            enqueueSync("tag", tagId, "create", JSONObject().put("name", name), now)
+            insertOrThrow("study_item_tag", null, ContentValues().apply {
+                put("study_item_id", itemId); put("tag_id", tagId)
+            })
         }
     }
 
@@ -1238,37 +1393,36 @@ class AppDatabase private constructor(context: Context) :
         hints: List<String> = emptyList(),
         answerPoints: List<String> = emptyList(),
         subject: String = "operating_systems",
-    ): String {
-        require(prompt.isNotBlank()) { "题干不能为空" }
-        require(templateType in MEMORY_TEMPLATES) { "不支持的卡片模板" }
-        when (templateType) {
-            "qa", "comparison" -> require(answer.isNotBlank()) { "答案不能为空" }
-            "cloze" -> require(Regex("\\{\\{c\\d+::.+?}}").containsMatchIn(prompt)) {
-                "填空题干缺少结构化标记"
-            }
-            "layered_hint" -> require(answer.isNotBlank() && hints.isNotEmpty()) {
-                "分层提示卡需要答案和提示"
-            }
-            "enumeration" -> require(answerPoints.size >= 2) { "枚举卡至少需要两个要点" }
-        }
+    ): String = createMemoryCard(MemoryCardDraft(
+        templateType = templateType, archetype = when (templateType) {
+            "comparison" -> "comparison"; "enumeration" -> "enumeration"
+            "image_occlusion" -> "diagram"; "cloze" -> "cloze"; else -> "qa"
+        }, subject = subject, knowledgePoint = "", prompt = prompt, answer = answer,
+        hints = hints, answerPoints = answerPoints,
+    ))
+
+    fun createMemoryCard(draft: MemoryCardDraft): String {
+        validateMemoryDraft(draft)
         val now = Instant.now().epochSecond
         val id = uuidV7()
         writableDatabase.inTransaction {
             insertOrThrow("study_item", null, ContentValues().apply {
                 put("id", id)
                 put("kind", "memory_card")
-                put("subject", subject)
+                put("subject", draft.subject)
                 put("created_at", now)
                 put("updated_at", now)
             })
+            insertOrThrow("card_profile_v5", null, profileValues(id, draft, now))
             insertOrThrow("memory_card", null, ContentValues().apply {
                 put("study_item_id", id)
-                put("template_type", templateType)
-                put("prompt_markdown", prompt.trim())
-                put("answer_markdown", answer.trim())
-                put("hints_json", jsonArray(hints))
-                put("answer_points_json", jsonArray(answerPoints))
+                put("template_type", draft.templateType)
+                put("prompt_markdown", draft.prompt.trim())
+                put("answer_markdown", draft.answer.trim())
+                put("hints_json", jsonArray(draft.hints))
+                put("answer_points_json", jsonArray(draft.answerPoints))
             })
+            replaceTagsInTransaction(id, draft.tags, now)
         }
         return id
     }
@@ -1283,8 +1437,17 @@ class AppDatabase private constructor(context: Context) :
         resolver: ContentResolver,
         uris: List<Uri>,
         sourceName: String = "",
+    ): String = createMathProblemFromImages(
+        resolver, uris, MathErrorDraft(sourceTitle = sourceName),
+    )
+
+    fun createMathProblemFromImages(
+        resolver: ContentResolver,
+        uris: List<Uri>,
+        draft: MathErrorDraft,
     ): String {
         require(uris.isNotEmpty() && uris.size <= 5) { "每道题请选择 1–5 张图片" }
+        validateMathDraft(draft)
         val mediaDirectory = File(appContext.filesDir, "media").apply { mkdirs() }
         val prepared = uris.map { uri ->
             val mime = resolver.getType(uri) ?: "image/jpeg"
@@ -1335,9 +1498,18 @@ class AppDatabase private constructor(context: Context) :
                 put("created_at", now)
                 put("updated_at", now)
             })
+            insertOrThrow("card_profile_v5", null, profileValues(problemId, draft, now))
             insertOrThrow("math_problem", null, ContentValues().apply {
                 put("study_item_id", problemId)
-                put("source_name", sourceName.trim())
+                put("source_name", draft.sourceTitle.trim())
+                put("source_page", draft.sourceLocator.trim())
+                if (draft.sourceYear != null) put("source_year", draft.sourceYear)
+                put("prompt_markdown", draft.prompt.trim())
+                put("solution_markdown", draft.solution.trim())
+                put("wrong_step_markdown", draft.firstAttempt.trim())
+                put("key_hint_markdown", draft.keyHint.trim())
+                if (draft.errorReason == null) putNull("default_error_reason")
+                else put("default_error_reason", draft.errorReason)
             })
             prepared.forEachIndexed { index, item ->
                 insertWithOnConflict("media", null, ContentValues().apply {
@@ -1366,8 +1538,83 @@ class AppDatabase private constructor(context: Context) :
                     put("sha256", item.sha256); put("byteCount", item.byteCount); put("mimeType", item.mime)
                 } }))
             }, now)
+            replaceTagsInTransaction(problemId, draft.tags, now)
         }
         return problemId
+    }
+
+    private fun validateMemoryDraft(draft: MemoryCardDraft) {
+        require(draft.prompt.isNotBlank()) { "回忆问题不能为空" }
+        require(draft.templateType in MEMORY_TEMPLATES) { "不支持的卡片模板" }
+        require(draft.archetype in MEMORY_ARCHETYPES) { "不支持的知识形式" }
+        require(draft.subject in MEMORY_SUBJECTS) { "请选择 408 科目" }
+        require(draft.sourceType in SOURCE_TYPES) { "不支持的来源类型" }
+        require(draft.sourceYear == null || draft.sourceYear in 1900..2200) { "来源年份无效" }
+        requireValidPayload(draft.structuredPayload)
+        when (draft.templateType) {
+            "qa", "comparison" -> require(draft.answer.isNotBlank()) { "核心答案不能为空" }
+            "cloze" -> require(Regex("\\{\\{c\\d+::.+?}}").containsMatchIn(draft.prompt)) {
+                "填空题干缺少 {{c1::答案}} 标记"
+            }
+            "layered_hint" -> require(draft.answer.isNotBlank() && draft.hints.isNotEmpty()) {
+                "分层提示卡需要核心答案和至少一层提示"
+            }
+            "enumeration" -> require(draft.answerPoints.size >= 2) { "枚举卡至少需要两个评分要点" }
+        }
+        when (draft.archetype) {
+            "comparison" -> require(draft.contrast.isNotBlank() || draft.answer.isNotBlank()) {
+                "对比卡需要明确差异维度"
+            }
+            "process", "enumeration", "scale_mapping" -> require(draft.answerPoints.size >= 2) {
+                "该知识形式至少需要两个可核对要点"
+            }
+            "formula_rule" -> require(draft.answer.isNotBlank() && draft.conditions.isNotBlank()) {
+                "公式卡需要公式和适用条件"
+            }
+        }
+    }
+
+    private fun validateMathDraft(draft: MathErrorDraft) {
+        require(draft.sourceType in SOURCE_TYPES) { "不支持的来源类型" }
+        require(draft.sourceYear == null || draft.sourceYear in 1900..2200) { "来源年份无效" }
+        require(draft.errorReason == null || draft.errorReason in MATH_ERROR_REASONS) { "错因类型无效" }
+        require(draft.targetSeconds == null || draft.targetSeconds in 10..7200) { "目标用时应在 10 秒到 120 分钟之间" }
+    }
+
+    private fun requireValidPayload(payload: String) {
+        val value = payload.trim().ifEmpty { "{}" }
+        require(runCatching {
+            if (value.startsWith("[")) JSONArray(value) else JSONObject(value)
+        }.isSuccess) { "结构化字段格式无效" }
+    }
+
+    private fun profileValues(id: String, draft: MemoryCardDraft, now: Long) = ContentValues().apply {
+        put("study_item_id", id); put("archetype", draft.archetype)
+        put("knowledge_point", draft.knowledgePoint.trim()); put("source_type", draft.sourceType)
+        put("source_title", draft.sourceTitle.trim()); put("source_chapter", draft.sourceChapter.trim())
+        put("source_locator", draft.sourceLocator.trim())
+        if (draft.sourceYear == null) putNull("source_year") else put("source_year", draft.sourceYear)
+        put("mechanism_markdown", draft.mechanism.trim()); put("conditions_markdown", draft.conditions.trim())
+        put("contrast_markdown", draft.contrast.trim()); put("example_markdown", draft.example.trim())
+        put("common_trap_markdown", draft.commonTrap.trim())
+        put("transfer_prompt_markdown", draft.transferPrompt.trim()); put("mnemonic", draft.mnemonic.trim())
+        put("structured_payload_json", draft.structuredPayload.trim().ifEmpty { "{}" })
+        put("created_at", now); put("updated_at", now)
+    }
+
+    private fun profileValues(id: String, draft: MathErrorDraft, now: Long) = ContentValues().apply {
+        put("study_item_id", id); put("archetype", "math_error")
+        put("knowledge_point", draft.knowledgePoint.trim()); put("source_type", draft.sourceType)
+        put("source_title", draft.sourceTitle.trim()); put("source_chapter", draft.sourceChapter.trim())
+        put("source_locator", draft.sourceLocator.trim())
+        if (draft.sourceYear == null) putNull("source_year") else put("source_year", draft.sourceYear)
+        put("first_attempt_markdown", draft.firstAttempt.trim())
+        put("error_trigger_markdown", draft.errorTrigger.trim())
+        put("general_method_markdown", draft.generalMethod.trim())
+        put("verification_markdown", draft.verification.trim())
+        put("transfer_prompt_markdown", draft.transferPrompt.trim())
+        if (draft.targetSeconds == null) putNull("target_seconds") else put("target_seconds", draft.targetSeconds)
+        put("created_at", now); put("updated_at", now)
     }
 
     fun updateMathDetails(
@@ -1411,7 +1658,19 @@ class AppDatabase private constructor(context: Context) :
         mathAttemptResult: String? = null,
         errorReason: String? = null,
         hintRevealed: Boolean = false,
+        hintLevel: Int = if (hintRevealed) 1 else 0,
+        pointHits: Int? = null,
+        pointCount: Int? = null,
+        confidence: Int = 3,
+        reflection: String = "",
+        answerRevealedBeforeCommit: Boolean = false,
     ): NativeScheduleResult {
+        require(confidence in 1..5) { "信心等级应为 1–5" }
+        require(hintLevel in 0..9) { "提示层级无效" }
+        require((pointHits == null && pointCount == null) ||
+            (pointHits != null && pointCount != null && pointCount > 0 && pointHits in 0..pointCount)) {
+            "要点评估无效"
+        }
         val preferences = learningPreferences()
         val memoryPreset = listOf("time_saving", "balanced", "reinforced")
             .indexOf(preferences.memoryPreset).coerceAtLeast(0)
@@ -1682,8 +1941,72 @@ class AppDatabase private constructor(context: Context) :
             })
             execSQL("UPDATE schedule_cache_v4 SET due_at = ?, replayed_action_count = ?, dirty = 0, rebuilt_at = ? WHERE study_item_id = ?",
                 arrayOf<Any>(result.dueAt, row.repetitions + 1, now, row.id))
+            appendLearningEvidenceV5(
+                row = row, reviewedAt = reviewedAt, durationSeconds = durationSeconds,
+                rating = appliedFeedback, mathAttemptResult = mathAttemptResult,
+                errorReason = errorReason, hintLevel = hintLevel,
+                pointHits = pointHits, pointCount = pointCount, confidence = confidence,
+                reflection = reflection, answerRevealedBeforeCommit = answerRevealedBeforeCommit,
+                dueAt = result.dueAt, now = now,
+            )
         }
         return result
+    }
+
+    private fun SQLiteDatabase.appendLearningEvidenceV5(
+        row: StudyRow,
+        reviewedAt: Long,
+        durationSeconds: Int,
+        rating: Int,
+        mathAttemptResult: String?,
+        errorReason: String?,
+        hintLevel: Int,
+        pointHits: Int?,
+        pointCount: Int?,
+        confidence: Int,
+        reflection: String,
+        answerRevealedBeforeCommit: Boolean,
+        dueAt: Long,
+        now: Long,
+    ) {
+        val task = rawQuery(
+            """SELECT id, task_type, repetitions, consecutive_failures FROM learning_task_v5
+               WHERE source_study_item_id = ? AND task_state IN ('active', 'legacy')
+                 AND dependency_ready = 1
+               ORDER BY CASE task_type WHEN 'math_repair' THEN 0 ELSE 1 END, due_at, id LIMIT 1""",
+            arrayOf(row.id),
+        ).use { cursor ->
+            if (!cursor.moveToFirst()) null else EvidenceTaskTarget(
+                cursor.getString(0), cursor.getString(1), cursor.getInt(2), cursor.getInt(3),
+            )
+        } ?: return
+        val correct = if (row.kind == "memory_card") rating >= 3
+            else mathAttemptResult == "effortful" || mathAttemptResult == "fluent"
+        val errorMask = when (errorReason) {
+            "concept" -> 1; "approach" -> 2; "calculation" -> 4; "misread" -> 8
+            "forgotten_fact" -> 16; "timeout" -> 32; "other" -> 64; else -> 0
+        }
+        val evidenceCounter = rawQuery(
+            "SELECT next_counter FROM local_device WHERE singleton = 1", null,
+        ).use { cursor -> check(cursor.moveToFirst()); cursor.getLong(0) }
+        update("learning_task_v5", ContentValues().apply {
+            put("task_state", "active"); put("due_at", dueAt); put("last_reviewed_at", reviewedAt)
+            put("repetitions", task.repetitions + 1)
+            put("consecutive_failures", if (correct) 0 else task.consecutiveFailures + 1)
+            put("updated_at", now)
+        }, "id = ?", arrayOf(task.id))
+        insertOrThrow("learning_evidence_v5", null, ContentValues().apply {
+            put("evidence_id", uuidV7()); put("learning_task_id", task.id); put("task_type", task.type)
+            put("reviewed_at", reviewedAt); put("correct", correct.toInt()); put("error_mask", errorMask)
+            if (pointHits == null) putNull("point_hits") else put("point_hits", pointHits)
+            if (pointCount == null) putNull("point_count") else put("point_count", pointCount)
+            put("hint_level", hintLevel); put("answer_revealed", answerRevealedBeforeCommit.toInt())
+            put("duration_seconds", durationSeconds.coerceAtLeast(0))
+            put("duration_reliable", (durationSeconds in 5..3600).toInt())
+            put("confidence", confidence); put("reflection_markdown", reflection.trim())
+            put("device_id", deviceId); put("device_counter", evidenceCounter); put("causal_cursor", 0)
+            put("created_at", now)
+        })
     }
 
     fun exportBackup(output: OutputStream) {
@@ -1726,10 +2049,10 @@ class AppDatabase private constructor(context: Context) :
         }
         val manifest = JSONObject().apply {
             put("format", "reviewfault-backup")
-            put("version", 4)
+            put("version", 5)
             put("appVersion", BuildConfig.VERSION_NAME)
-            put("schemaVersion", 4)
-            put("schedulerAbiVersion", 4)
+            put("schemaVersion", 5)
+            put("schedulerAbiVersion", 5)
             put("exportedAt", Instant.now().epochSecond)
             put("excludedTables", JSONArray(listOf(
                 "local_device", "sync_cursor", "sync_revision", "sync_outbox",
@@ -1798,7 +2121,8 @@ class AppDatabase private constructor(context: Context) :
                 ((backupVersion == 1 && schemaVersion == 1 && abiVersion == 1) ||
                     (backupVersion == 2 && schemaVersion == 2 && abiVersion == 2) ||
                     (backupVersion == 3 && schemaVersion == 3 && abiVersion == 3) ||
-                    (backupVersion == 4 && schemaVersion == 4 && abiVersion == 4))
+                    (backupVersion == 4 && schemaVersion == 4 && abiVersion == 4) ||
+                    (backupVersion == 5 && schemaVersion == 5 && abiVersion == 5))
             ) { "不是受支持的 ReviewFault 备份" }
             val listed = manifest.getJSONArray("files")
             val listedFiles = mutableSetOf<String>()
@@ -1842,7 +2166,11 @@ class AppDatabase private constructor(context: Context) :
                     applyMigration(checkDb, "004_v0_4.sql")
                     checkDb.version = 4
                 }
-                require(checkDb.version == 4) { "备份数据库版本不兼容" }
+                if (checkDb.version == 4) {
+                    applyMigration(checkDb, "005_v0_5.sql")
+                    checkDb.version = 5
+                }
+                require(checkDb.version == 5) { "备份数据库版本不兼容" }
                 checkDb.rawQuery("PRAGMA integrity_check", null).use { cursor ->
                     require(cursor.moveToFirst() && cursor.getString(0) == "ok") {
                         "备份数据库完整性检查失败"
@@ -1876,7 +2204,7 @@ class AppDatabase private constructor(context: Context) :
             val restoredMedia = File(restoreRoot, "media")
             if (restoredMedia.exists()) restoredMedia.copyRecursively(mediaDirectory, overwrite = true)
             readableDatabase.rawQuery("SELECT schema_version FROM schema_metadata", null).use {
-                require(it.moveToFirst() && it.getInt(0) == 4) { "恢复后的数据库无法打开" }
+                require(it.moveToFirst() && it.getInt(0) == 5) { "恢复后的数据库无法打开" }
             }
         } catch (error: Exception) {
             close()
@@ -1904,14 +2232,68 @@ class AppDatabase private constructor(context: Context) :
         answer = getString(11),
         mediaPath = if (isNull(12)) null else getString(12),
         templateType = getString(13),
-        structuredJson = getString(14),
+        hints = jsonStringList(getString(14)),
+        answerPoints = jsonStringList(getString(15)),
+        profile = CardProfile(
+            archetype = getString(16), knowledgePoint = getString(17), sourceType = getString(18),
+            sourceTitle = getString(19), sourceChapter = getString(20), sourceLocator = getString(21),
+            sourceYear = if (isNull(22)) null else getInt(22), mechanism = getString(23),
+            conditions = getString(24), contrast = getString(25), example = getString(26),
+            commonTrap = getString(27), transferPrompt = getString(28), mnemonic = getString(29),
+            firstAttempt = getString(30), errorTrigger = getString(31), generalMethod = getString(32),
+            verification = getString(33), targetSeconds = if (isNull(34)) null else getInt(34),
+            structuredPayload = getString(35),
+        ),
+        tags = jsonStringList(getString(36)),
     )
 
+    private fun jsonStringList(value: String): List<String> = try {
+        val array = JSONArray(value)
+        buildList { for (index in 0 until array.length()) add(array.getString(index)) }
+    } catch (_: Exception) { emptyList() }
+
     companion object {
+        private val STUDY_ROW_COLUMNS = """
+            s.id, s.kind, s.subject, s.scheduler_state, s.difficulty,
+            s.stability_days, s.due_at, s.last_reviewed_at, s.repetitions, s.lapses,
+            COALESCE(m.prompt_markdown, p.prompt_markdown, ''),
+            COALESCE(m.answer_markdown, p.solution_markdown, ''),
+            media.relative_path, COALESCE(m.template_type, ''),
+            CASE WHEN s.kind = 'math_problem' AND COALESCE(p.key_hint_markdown, '') <> ''
+                 THEN json_array(p.key_hint_markdown) ELSE COALESCE(m.hints_json, '[]') END,
+            COALESCE(m.answer_points_json, '[]'),
+            COALESCE(cp.archetype, CASE WHEN s.kind = 'math_problem' THEN 'math_error' ELSE 'qa' END),
+            COALESCE(cp.knowledge_point, ''), COALESCE(cp.source_type, 'notes'),
+            COALESCE(NULLIF(cp.source_title, ''), p.source_name, ''),
+            COALESCE(cp.source_chapter, ''), COALESCE(cp.source_locator, ''), cp.source_year,
+            COALESCE(cp.mechanism_markdown, ''), COALESCE(cp.conditions_markdown, ''),
+            COALESCE(cp.contrast_markdown, ''), COALESCE(cp.example_markdown, ''),
+            COALESCE(cp.common_trap_markdown, ''), COALESCE(cp.transfer_prompt_markdown, ''),
+            COALESCE(cp.mnemonic, ''),
+            COALESCE(NULLIF(cp.first_attempt_markdown, ''), p.wrong_step_markdown, ''),
+            COALESCE(cp.error_trigger_markdown, ''), COALESCE(cp.general_method_markdown, ''),
+            COALESCE(cp.verification_markdown, ''), cp.target_seconds,
+            COALESCE(cp.structured_payload_json, '{}'),
+            COALESCE((SELECT json_group_array(tag_name) FROM (
+              SELECT t.name AS tag_name FROM study_item_tag sit JOIN tag t ON t.id = sit.tag_id
+              WHERE sit.study_item_id = s.id AND t.deleted_at IS NULL ORDER BY t.name COLLATE NOCASE
+            )), '[]')
+        """.trimIndent()
         private const val MAX_BACKUP_BYTES = 2L * 1024 * 1024 * 1024
         private const val MAX_BACKUP_ENTRIES = 10_000
         private val MEMORY_TEMPLATES = setOf(
             "qa", "cloze", "layered_hint", "enumeration", "image_occlusion", "comparison",
+        )
+        private val MEMORY_ARCHETYPES = setOf(
+            "concept", "comparison", "process", "enumeration", "scale_mapping",
+            "formula_rule", "diagram", "cloze", "qa",
+        )
+        private val MEMORY_SUBJECTS = setOf(
+            "data_structures", "computer_organization", "operating_systems", "computer_networks",
+        )
+        private val SOURCE_TYPES = setOf("textbook", "course", "past_exam", "practice", "notes", "other")
+        private val MATH_ERROR_REASONS = setOf(
+            "concept", "approach", "calculation", "misread", "forgotten_fact", "timeout", "other",
         )
 
         @Volatile private var instance: AppDatabase? = null
@@ -1934,8 +2316,8 @@ class AppDatabase private constructor(context: Context) :
                 ) return@forEach
                 if (line.startsWith("CREATE TRIGGER", ignoreCase = true)) inTrigger = true
                 current.append(rawLine).append('\n')
-                val complete = if (inTrigger) line.equals("END;", ignoreCase = true)
-                else line.endsWith(';')
+                val complete = if (inTrigger) line.endsWith("END;", ignoreCase = true)
+                    else line.endsWith(';')
                 if (complete) {
                     statements += current.toString().trim().removeSuffix(";")
                     current.clear()

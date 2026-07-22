@@ -22,5 +22,8 @@
     <Content Include="..\..\..\schema\migrations\004_v0_4.sql"
              Link="schema\004_v0_4.sql"
              CopyToOutputDirectory="PreserveNewest" />
+    <Content Include="..\..\..\schema\migrations\005_v0_5.sql"
+             Link="schema\005_v0_5.sql"
+             CopyToOutputDirectory="PreserveNewest" />
   </ItemGroup>
 </Project>

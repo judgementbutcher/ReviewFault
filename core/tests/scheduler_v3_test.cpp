@@ -74,8 +74,8 @@ void test_math_quality_and_failure_rules() {
 }
 
 void test_c_abi_v3() {
-  expect(rf_scheduler_abi_version() == 4,
-         "C ABI v4 retains the version three review entry points");
+  expect(rf_scheduler_abi_version() == 5,
+         "C ABI v5 retains the version three review entry points");
   auto memory = rf_new_memory_state_v2();
   rf_memory_review_input_v3 input{sizeof(input), RF_RATING_GOOD,
                                   RF_MEMORY_BALANCED, kNow, 200, 0.02, 0};

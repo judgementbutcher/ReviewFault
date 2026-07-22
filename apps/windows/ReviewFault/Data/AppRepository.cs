@@ -21,7 +21,39 @@ public sealed record StudyRow(
     string Answer,
     string? MediaPath,
     string TemplateType,
-    string StructuredJson);
+    string StructuredJson)
+{
+    public CardProfile Profile { get; init; } = new();
+    public string HintsJson { get; init; } = "[]";
+    public string AnswerPointsJson { get; init; } = "[]";
+    public string TagsJson { get; init; } = "[]";
+}
+
+public sealed record CardProfile(
+    string Archetype = "qa", string KnowledgePoint = "", string SourceType = "notes",
+    string SourceTitle = "", string SourceChapter = "", string SourceLocator = "",
+    int? SourceYear = null, string Mechanism = "", string Conditions = "",
+    string Contrast = "", string Example = "", string CommonTrap = "",
+    string TransferPrompt = "", string Mnemonic = "", string FirstAttempt = "",
+    string ErrorTrigger = "", string GeneralMethod = "", string Verification = "",
+    int? TargetSeconds = null, string StructuredPayload = "{}");
+
+public sealed record MemoryCardDraft(
+    string TemplateType, string Archetype, string Subject, string KnowledgePoint,
+    string Prompt, string Answer, IReadOnlyList<string> Hints, IReadOnlyList<string> AnswerPoints,
+    string Mechanism = "", string Conditions = "", string Contrast = "", string Example = "",
+    string CommonTrap = "", string TransferPrompt = "", string Mnemonic = "",
+    string StructuredPayload = "{}", string SourceType = "notes", string SourceTitle = "",
+    string SourceChapter = "", string SourceLocator = "", int? SourceYear = null,
+    IReadOnlyList<string>? Tags = null);
+
+public sealed record MathErrorDraft(
+    string KnowledgePoint = "", string SourceType = "practice", string SourceTitle = "",
+    string SourceChapter = "", string SourceLocator = "", int? SourceYear = null,
+    string Solution = "", string FirstAttempt = "", string ErrorTrigger = "",
+    string? ErrorReason = null, string KeyHint = "", string GeneralMethod = "",
+    string Verification = "", string TransferPrompt = "", int? TargetSeconds = null,
+    IReadOnlyList<string>? Tags = null);
 
 public sealed record DashboardSummary(
     int Overdue, int DueToday, int NewItems, int EstimatedMinutes,
@@ -50,7 +82,7 @@ public sealed record MissingMediaObject(string Sha256, string FilePath);
 
 public sealed class AppRepository
 {
-    private const string AppVersion = "0.5.0";
+    private const string AppVersion = "0.6.0";
     private const long MaxBackupBytes = 2L * 1024 * 1024 * 1024;
     private const int MaxBackupEntries = 10_000;
     // The v1 review_log remains read-only input for gradual history replay.
@@ -112,7 +144,15 @@ public sealed class AppRepository
             await command.ExecuteNonQueryAsync();
             current = 4;
         }
-        if (current != 4)
+        if (current == 4)
+        {
+            var migrationPath = Path.Combine(AppContext.BaseDirectory, "schema", "005_v0_5.sql");
+            var command = connection.CreateCommand();
+            command.CommandText = await File.ReadAllTextAsync(migrationPath);
+            await command.ExecuteNonQueryAsync();
+            current = 5;
+        }
+        if (current != 5)
         {
             throw new InvalidOperationException($"不支持的数据库版本：{current}");
         }
@@ -352,6 +392,8 @@ public sealed class AppRepository
                 await ApplyRemoteMemoryCardAsync(connection, transaction, operation);
             else if (operation.EntityType == "mathProblem")
                 await ApplyRemoteMathProblemAsync(connection, transaction, operation);
+            else if (operation.EntityType == "cardProfile")
+                await ApplyRemoteCardProfileAsync(connection, transaction, operation);
             else if (operation.EntityType == "tag")
                 await ApplyRemoteTagAsync(connection, transaction, operation);
             else if (operation.EntityType == "relation")
@@ -362,6 +404,8 @@ public sealed class AppRepository
                 await ApplyRemoteAttemptArtifactAsync(connection, transaction, operation);
             else if (operation.EntityType == "reviewAction")
                 await ApplyRemoteReviewActionAsync(connection, transaction, operation);
+            else if (operation.EntityType == "learningEvidence")
+                await ApplyRemoteLearningEvidenceAsync(connection, transaction, operation);
             // Content triggers serve ordinary local writes too. Remove only operations
             // created while projecting this pulled fact so it is not echoed to the service.
             await ExecuteAsync(connection, transaction, """
@@ -400,6 +444,7 @@ public sealed class AppRepository
         lookup.Parameters.AddWithValue("$id", operation.EntityId);
         var existing = (string?)await lookup.ExecuteScalarAsync();
         var kind = fields.TryGetProperty("kind", out var kindValue) ? kindValue.GetString()! : existing ?? "memory_card";
+        var subjectName = Text(fields, "subject", kind == "math_problem" ? "math" : "operating_systems");
         var now = fields.TryGetProperty("updatedAt", out var updated) ? updated.GetInt64() : operation.OccurredAt;
         if (existing is null)
         {
@@ -407,7 +452,7 @@ public sealed class AppRepository
                 INSERT INTO study_item (id, kind, subject, created_at, updated_at, deleted_at)
                 VALUES ($id, $kind, $subject, $created, $updated, $deleted)
                 """, ("$id", operation.EntityId), ("$kind", kind),
-                ("$subject", Text(fields, "subject", kind == "math_problem" ? "math" : "operating_systems")),
+                ("$subject", subjectName),
                 ("$created", Long(fields, "createdAt", operation.OccurredAt)), ("$updated", now),
                 ("$deleted", operation.Action == "delete" ? operation.OccurredAt : DBNull.Value));
             if (kind == "memory_card")
@@ -426,6 +471,7 @@ public sealed class AppRepository
                     ("$hint", Text(fields, "keyHint")));
             if (kind == "math_problem" && fields.TryGetProperty("media", out var media))
                 await AttachRemoteMediaMetadataAsync(connection, transaction, operation.EntityId, media, operation.OccurredAt);
+            await CreateLearningRouteAsync(connection, transaction, operation.EntityId, kind, subjectName, now);
             return;
         }
         await ExecuteAsync(connection, transaction, """
@@ -683,6 +729,79 @@ public sealed class AppRepository
             ("$cursor", operation.ServerSeq), ("$created", operation.OccurredAt));
     }
 
+    private static async Task ApplyRemoteLearningEvidenceAsync(
+        SqliteConnection connection, System.Data.Common.DbTransaction transaction, PulledOperation operation)
+    {
+        var fields = operation.ChangedFields; var taskId = Text(fields, "taskId");
+        if (string.IsNullOrEmpty(taskId)) return;
+        await ExecuteAsync(connection, transaction, """
+            INSERT OR IGNORE INTO learning_evidence_v5 (evidence_id, learning_task_id, task_type,
+              reviewed_at, correct, error_mask, point_hits, point_count, hint_level, answer_revealed,
+              duration_seconds, duration_reliable, confidence, reflection_markdown, artifact_id,
+              device_id, device_counter, causal_cursor, created_at)
+            SELECT $id, $task, $type, $reviewed, $correct, $mask, $hits, $count, $hint, $answer,
+              $duration, $reliable, $confidence, $reflection, $artifact, $device, $counter, $cursor, $created
+            WHERE EXISTS (SELECT 1 FROM learning_task_v5 WHERE id = $task)
+            """, ("$id", operation.EntityId), ("$task", taskId),
+            ("$type", Text(fields, "taskType", "memory_recall")),
+            ("$reviewed", Long(fields, "reviewedAt", operation.OccurredAt)),
+            ("$correct", Long(fields, "correct", 0) != 0 ? 1 : 0),
+            ("$mask", Long(fields, "errorMask", 0)), ("$hits", OptionalLong(fields, "pointHits")),
+            ("$count", OptionalLong(fields, "pointCount")), ("$hint", Long(fields, "hintLevel", 0)),
+            ("$answer", Long(fields, "answerRevealed", 0) != 0 ? 1 : 0),
+            ("$duration", OptionalLong(fields, "durationSeconds")),
+            ("$reliable", Long(fields, "durationReliable", 1) != 0 ? 1 : 0),
+            ("$confidence", OptionalLong(fields, "confidence")), ("$reflection", Text(fields, "reflection")),
+            ("$artifact", OptionalText(fields, "artifactId")), ("$device", operation.DeviceId),
+            ("$counter", operation.DeviceCounter), ("$cursor", operation.ServerSeq), ("$created", operation.OccurredAt));
+    }
+
+    private static async Task ApplyRemoteCardProfileAsync(
+        SqliteConnection connection, System.Data.Common.DbTransaction transaction, PulledOperation operation)
+    {
+        var fields = operation.ChangedFields;
+        await ExecuteAsync(connection, transaction, """
+            INSERT INTO card_profile_v5 (study_item_id, archetype, knowledge_point, source_type,
+              source_title, source_chapter, source_locator, source_year, mechanism_markdown,
+              conditions_markdown, contrast_markdown, example_markdown, common_trap_markdown,
+              transfer_prompt_markdown, mnemonic, first_attempt_markdown, error_trigger_markdown,
+              general_method_markdown, verification_markdown, target_seconds,
+              structured_payload_json, created_at, updated_at)
+            SELECT $id, $archetype, $knowledge, $sourceType, $sourceTitle, $sourceChapter,
+              $sourceLocator, $sourceYear, $mechanism, $conditions, $contrast, $example,
+              $trap, $transfer, $mnemonic, $firstAttempt, $errorTrigger, $method,
+              $verification, $target, $payload, $now, $now
+            WHERE EXISTS (SELECT 1 FROM study_item WHERE id = $id)
+            ON CONFLICT(study_item_id) DO UPDATE SET archetype = excluded.archetype,
+              knowledge_point = excluded.knowledge_point, source_type = excluded.source_type,
+              source_title = excluded.source_title, source_chapter = excluded.source_chapter,
+              source_locator = excluded.source_locator, source_year = excluded.source_year,
+              mechanism_markdown = excluded.mechanism_markdown,
+              conditions_markdown = excluded.conditions_markdown,
+              contrast_markdown = excluded.contrast_markdown,
+              example_markdown = excluded.example_markdown,
+              common_trap_markdown = excluded.common_trap_markdown,
+              transfer_prompt_markdown = excluded.transfer_prompt_markdown,
+              mnemonic = excluded.mnemonic, first_attempt_markdown = excluded.first_attempt_markdown,
+              error_trigger_markdown = excluded.error_trigger_markdown,
+              general_method_markdown = excluded.general_method_markdown,
+              verification_markdown = excluded.verification_markdown,
+              target_seconds = excluded.target_seconds,
+              structured_payload_json = excluded.structured_payload_json,
+              updated_at = excluded.updated_at
+            """, ("$id", operation.EntityId), ("$archetype", Text(fields, "archetype", "qa")),
+            ("$knowledge", Text(fields, "knowledgePoint")), ("$sourceType", Text(fields, "sourceType", "notes")),
+            ("$sourceTitle", Text(fields, "sourceTitle")), ("$sourceChapter", Text(fields, "sourceChapter")),
+            ("$sourceLocator", Text(fields, "sourceLocator")), ("$sourceYear", OptionalLong(fields, "sourceYear")),
+            ("$mechanism", Text(fields, "mechanism")), ("$conditions", Text(fields, "conditions")),
+            ("$contrast", Text(fields, "contrast")), ("$example", Text(fields, "example")),
+            ("$trap", Text(fields, "commonTrap")), ("$transfer", Text(fields, "transferPrompt")),
+            ("$mnemonic", Text(fields, "mnemonic")), ("$firstAttempt", Text(fields, "firstAttempt")),
+            ("$errorTrigger", Text(fields, "errorTrigger")), ("$method", Text(fields, "generalMethod")),
+            ("$verification", Text(fields, "verification")), ("$target", OptionalLong(fields, "targetSeconds")),
+            ("$payload", Raw(fields, "structuredPayload", "{}")), ("$now", operation.OccurredAt));
+    }
+
     private static string Text(JsonElement value, string name, string fallback = "") =>
         value.TryGetProperty(name, out var property) && property.ValueKind == JsonValueKind.String
             ? property.GetString() ?? fallback : fallback;
@@ -899,16 +1018,45 @@ public sealed class AppRepository
                    COALESCE(m.prompt_markdown, p.prompt_markdown, ''),
                    COALESCE(m.answer_markdown, p.solution_markdown, ''),
                    media.relative_path, COALESCE(m.template_type, ''),
-                   CASE WHEN m.template_type = 'layered_hint' THEN m.hints_json
+                   CASE WHEN s.kind = 'math_problem' AND COALESCE(p.key_hint_markdown, '') <> ''
+                          THEN json_array(p.key_hint_markdown)
+                        WHEN m.template_type = 'layered_hint' THEN m.hints_json
                         WHEN m.template_type = 'enumeration' THEN m.answer_points_json
-                        ELSE '[]' END
+                        ELSE '[]' END,
+                   COALESCE(m.hints_json, '[]'), COALESCE(m.answer_points_json, '[]'),
+                   COALESCE(cp.archetype, CASE WHEN s.kind = 'math_problem' THEN 'math_error' ELSE 'qa' END),
+                   COALESCE(cp.knowledge_point, ''), COALESCE(cp.source_type, 'notes'),
+                   COALESCE(NULLIF(cp.source_title, ''), p.source_name, ''),
+                   COALESCE(cp.source_chapter, ''), COALESCE(cp.source_locator, ''), cp.source_year,
+                   COALESCE(cp.mechanism_markdown, ''), COALESCE(cp.conditions_markdown, ''),
+                   COALESCE(cp.contrast_markdown, ''), COALESCE(cp.example_markdown, ''),
+                   COALESCE(cp.common_trap_markdown, ''), COALESCE(cp.transfer_prompt_markdown, ''),
+                   COALESCE(cp.mnemonic, ''),
+                   COALESCE(NULLIF(cp.first_attempt_markdown, ''), p.wrong_step_markdown, ''),
+                   COALESCE(cp.error_trigger_markdown, ''), COALESCE(cp.general_method_markdown, ''),
+                   COALESCE(cp.verification_markdown, ''), cp.target_seconds,
+                   COALESCE(cp.structured_payload_json, '{}'),
+                   COALESCE((SELECT json_group_array(tag_name) FROM (
+                     SELECT t.name AS tag_name FROM study_item_tag sit JOIN tag t ON t.id = sit.tag_id
+                     WHERE sit.study_item_id = s.id AND t.deleted_at IS NULL ORDER BY t.name COLLATE NOCASE
+                   )), '[]')
             FROM study_item s
             LEFT JOIN memory_card m ON m.study_item_id = s.id
             LEFT JOIN math_problem p ON p.study_item_id = s.id
+            LEFT JOIN card_profile_v5 cp ON cp.study_item_id = s.id
             LEFT JOIN math_problem_media pm
               ON pm.math_problem_id = s.id AND pm.role = 'prompt' AND pm.sort_order = 0
             LEFT JOIN media ON media.id = pm.media_id
             CROSS JOIN learning_preferences lp
+            JOIN learning_task_v5 task ON task.id = (
+              SELECT candidate.id FROM learning_task_v5 candidate
+              WHERE candidate.source_study_item_id = s.id
+                AND candidate.task_state IN ('active', 'legacy')
+                AND candidate.dependency_ready = 1
+              ORDER BY CASE candidate.task_type WHEN 'math_repair' THEN 0 ELSE 1 END,
+                candidate.due_at, candidate.id
+              LIMIT 1
+            )
             WHERE s.suspended_at IS NULL AND s.deleted_at IS NULL
               AND lp.singleton = 1
               AND ($excludedItemIds = '' OR instr($excludedItemIds, '|' || s.id || '|') = 0)
@@ -918,29 +1066,22 @@ public sealed class AppRepository
                   (s.subject = 'computer_organization' AND lp.enable_computer_organization = 1) OR
                   (s.subject = 'operating_systems' AND lp.enable_operating_systems = 1) OR
                   (s.subject = 'computer_networks' AND lp.enable_computer_networks = 1))))
-              AND ((s.scheduler_state <> 0 AND s.due_at <= $now)
-                OR ($includeNewItems = 1 AND s.scheduler_state = 0 AND (s.kind = 'math_problem' OR (
-                  SELECT
-                    (SELECT COUNT(*) FROM review_event_v2 e
-                     JOIN memory_review_event_v2 mr ON mr.review_event_id = e.id
-                     WHERE mr.state_before = 0 AND e.reviewed_at >= $dayStart) +
-                    (SELECT COUNT(*) FROM review_event_v3 e
-                     JOIN memory_review_event_v3 mr ON mr.review_event_id = e.id
-                     WHERE mr.state_before = 0 AND e.reviewed_at >= $dayStart)
-                ) < lp.daily_new_memory_limit)))
+              AND task.due_at <= $now
+              AND ($includeNewItems = 1 OR task.repetitions > 0 OR task.task_state = 'legacy')
+              AND (substr(task.task_type, 1, 7) <> 'memory_' OR task.repetitions > 0 OR task.task_state = 'legacy' OR (
+                SELECT
+                  (SELECT COUNT(*) FROM review_event_v2 e
+                   JOIN memory_review_event_v2 mr ON mr.review_event_id = e.id
+                   WHERE mr.state_before = 0 AND e.reviewed_at >= $dayStart) +
+                  (SELECT COUNT(*) FROM review_event_v3 e
+                   JOIN memory_review_event_v3 mr ON mr.review_event_id = e.id
+                   WHERE mr.state_before = 0 AND e.reviewed_at >= $dayStart)
+              ) < lp.daily_new_memory_limit)
             ORDER BY
-              CASE WHEN s.scheduler_state <> 0 AND s.due_at < $dayStart THEN 0
-                   WHEN s.scheduler_state <> 0 THEN 1 ELSE 2 END,
-              CASE WHEN s.scheduler_state <> 0 AND s.due_at < $dayStart
-                   THEN CASE WHEN s.kind = 'memory_card' THEN 0 ELSE 1 END ELSE 0 END,
-              CASE WHEN s.kind = 'math_problem' AND s.chapter_id IS NOT NULL AND
-                s.chapter_id = (SELECT previous.chapter_id FROM study_item previous
-                  WHERE previous.id = (SELECT study_item_id FROM (
-                    SELECT study_item_id, reviewed_at FROM review_event_v3
-                    UNION ALL SELECT study_item_id, reviewed_at FROM review_event_v2
-                  ) ORDER BY reviewed_at DESC LIMIT 1)) THEN 1 ELSE 0 END,
-              CASE WHEN s.kind = 'memory_card' THEN 0 ELSE 1 END,
-              s.due_at, s.created_at
+              CASE WHEN task.repetitions = 0 AND task.task_state <> 'legacy' THEN 1 ELSE 0 END,
+              CASE task.task_type WHEN 'math_repair' THEN 0 ELSE 1 END,
+              CASE WHEN task.due_at < $dayStart THEN 0 ELSE 1 END,
+              task.due_at, task.created_at
             LIMIT 1
             """;
         command.Parameters.AddWithValue("$now", now);
@@ -949,13 +1090,7 @@ public sealed class AppRepository
         command.Parameters.AddWithValue("$excludedItemIds", encodedExcludedItemIds);
         await using var reader = await command.ExecuteReaderAsync();
         if (!await reader.ReadAsync()) return null;
-        return new StudyRow(
-            reader.GetString(0), reader.GetString(1), reader.GetString(2),
-            (CardState)reader.GetInt32(3), reader.GetDouble(4), reader.GetDouble(5),
-            reader.GetInt64(6), reader.GetInt64(7), checked((uint)reader.GetInt64(8)),
-            checked((uint)reader.GetInt64(9)), reader.GetString(10), reader.GetString(11),
-            reader.IsDBNull(12) ? null : reader.GetString(12),
-            reader.GetString(13), reader.GetString(14));
+        return ReadStudyRow(reader);
     }
 
     public async Task<IReadOnlyList<StudyRow>> SearchAsync(string query)
@@ -969,19 +1104,45 @@ public sealed class AppRepository
                    COALESCE(m.prompt_markdown, p.prompt_markdown, ''),
                    COALESCE(m.answer_markdown, p.solution_markdown, ''),
                    media.relative_path, COALESCE(m.template_type, ''),
-                   CASE WHEN m.template_type = 'layered_hint' THEN m.hints_json
+                   CASE WHEN s.kind = 'math_problem' AND COALESCE(p.key_hint_markdown, '') <> ''
+                          THEN json_array(p.key_hint_markdown)
+                        WHEN m.template_type = 'layered_hint' THEN m.hints_json
                         WHEN m.template_type = 'enumeration' THEN m.answer_points_json
-                        ELSE '[]' END
+                        ELSE '[]' END,
+                   COALESCE(m.hints_json, '[]'), COALESCE(m.answer_points_json, '[]'),
+                   COALESCE(cp.archetype, CASE WHEN s.kind = 'math_problem' THEN 'math_error' ELSE 'qa' END),
+                   COALESCE(cp.knowledge_point, ''), COALESCE(cp.source_type, 'notes'),
+                   COALESCE(NULLIF(cp.source_title, ''), p.source_name, ''),
+                   COALESCE(cp.source_chapter, ''), COALESCE(cp.source_locator, ''), cp.source_year,
+                   COALESCE(cp.mechanism_markdown, ''), COALESCE(cp.conditions_markdown, ''),
+                   COALESCE(cp.contrast_markdown, ''), COALESCE(cp.example_markdown, ''),
+                   COALESCE(cp.common_trap_markdown, ''), COALESCE(cp.transfer_prompt_markdown, ''),
+                   COALESCE(cp.mnemonic, ''),
+                   COALESCE(NULLIF(cp.first_attempt_markdown, ''), p.wrong_step_markdown, ''),
+                   COALESCE(cp.error_trigger_markdown, ''), COALESCE(cp.general_method_markdown, ''),
+                   COALESCE(cp.verification_markdown, ''), cp.target_seconds,
+                   COALESCE(cp.structured_payload_json, '{}'),
+                   COALESCE((SELECT json_group_array(tag_name) FROM (
+                     SELECT t.name AS tag_name FROM study_item_tag sit JOIN tag t ON t.id = sit.tag_id
+                     WHERE sit.study_item_id = s.id AND t.deleted_at IS NULL ORDER BY t.name COLLATE NOCASE
+                   )), '[]')
             FROM study_item s
             LEFT JOIN memory_card m ON m.study_item_id = s.id
             LEFT JOIN math_problem p ON p.study_item_id = s.id
+            LEFT JOIN card_profile_v5 cp ON cp.study_item_id = s.id
             LEFT JOIN math_problem_media pm
               ON pm.math_problem_id = s.id AND pm.role = 'prompt' AND pm.sort_order = 0
             LEFT JOIN media ON media.id = pm.media_id
             WHERE s.deleted_at IS NULL AND (
               $query = '' OR COALESCE(m.prompt_markdown, p.prompt_markdown, '') LIKE $pattern ESCAPE '\'
               OR COALESCE(m.answer_markdown, p.solution_markdown, '') LIKE $pattern ESCAPE '\'
-              OR COALESCE(p.source_name, '') LIKE $pattern ESCAPE '\')
+              OR COALESCE(p.source_name, '') LIKE $pattern ESCAPE '\'
+              OR COALESCE(cp.knowledge_point, '') LIKE $pattern ESCAPE '\'
+              OR COALESCE(cp.source_title, '') LIKE $pattern ESCAPE '\'
+              OR COALESCE(cp.source_chapter, '') LIKE $pattern ESCAPE '\'
+              OR COALESCE(cp.source_locator, '') LIKE $pattern ESCAPE '\'
+              OR EXISTS (SELECT 1 FROM study_item_tag qit JOIN tag qt ON qt.id = qit.tag_id
+                WHERE qit.study_item_id = s.id AND qt.name LIKE $pattern ESCAPE '\'))
             ORDER BY s.updated_at DESC LIMIT 100
             """;
         command.Parameters.AddWithValue("$query", query.Trim());
@@ -991,16 +1152,29 @@ public sealed class AppRepository
         await using var reader = await command.ExecuteReaderAsync();
         while (await reader.ReadAsync())
         {
-            rows.Add(new StudyRow(
-                reader.GetString(0), reader.GetString(1), reader.GetString(2),
-                (CardState)reader.GetInt32(3), reader.GetDouble(4), reader.GetDouble(5),
-                reader.GetInt64(6), reader.GetInt64(7), checked((uint)reader.GetInt64(8)),
-                checked((uint)reader.GetInt64(9)), reader.GetString(10), reader.GetString(11),
-                reader.IsDBNull(12) ? null : reader.GetString(12),
-                reader.GetString(13), reader.GetString(14)));
+            rows.Add(ReadStudyRow(reader));
         }
         return rows;
     }
+
+    private static StudyRow ReadStudyRow(SqliteDataReader reader) => new(
+        reader.GetString(0), reader.GetString(1), reader.GetString(2),
+        (CardState)reader.GetInt32(3), reader.GetDouble(4), reader.GetDouble(5),
+        reader.GetInt64(6), reader.GetInt64(7), checked((uint)reader.GetInt64(8)),
+        checked((uint)reader.GetInt64(9)), reader.GetString(10), reader.GetString(11),
+        reader.IsDBNull(12) ? null : reader.GetString(12), reader.GetString(13), reader.GetString(14))
+    {
+        HintsJson = reader.GetString(15),
+        AnswerPointsJson = reader.GetString(16),
+        Profile = new CardProfile(
+            reader.GetString(17), reader.GetString(18), reader.GetString(19), reader.GetString(20),
+            reader.GetString(21), reader.GetString(22), reader.IsDBNull(23) ? null : reader.GetInt32(23),
+            reader.GetString(24), reader.GetString(25), reader.GetString(26), reader.GetString(27),
+            reader.GetString(28), reader.GetString(29), reader.GetString(30), reader.GetString(31),
+            reader.GetString(32), reader.GetString(33), reader.GetString(34),
+            reader.IsDBNull(35) ? null : reader.GetInt32(35), reader.GetString(36)),
+        TagsJson = reader.GetString(37),
+    };
 
     public async Task<LearningPreferences> GetLearningPreferencesAsync()
     {
@@ -1100,13 +1274,22 @@ public sealed class AppRepository
     {
         await using var connection = await OpenAsync();
         await using var transaction = await connection.BeginTransactionAsync();
+        await ReplaceTagsInTransactionAsync(connection, transaction, itemId, names,
+            DateTimeOffset.UtcNow.ToUnixTimeSeconds());
+        await transaction.CommitAsync();
+    }
+
+    private static async Task ReplaceTagsInTransactionAsync(
+        SqliteConnection connection, System.Data.Common.DbTransaction transaction,
+        string itemId, IReadOnlyList<string> names, long now)
+    {
         await ExecuteAsync(connection, transaction, "DELETE FROM study_item_tag WHERE study_item_id = $id",
             ("$id", itemId));
         foreach (var name in names.Select(value => value.Trim()).Where(value => value.Length > 0)
-                     .Distinct(StringComparer.OrdinalIgnoreCase))
+                     .Distinct(StringComparer.OrdinalIgnoreCase).Take(30))
         {
+            if (name.Length > 60) throw new ArgumentException("单个标签不能超过 60 个字符");
             var tagId = NewId();
-            var now = DateTimeOffset.UtcNow.ToUnixTimeSeconds();
             await ExecuteAsync(connection, transaction, """
                 INSERT INTO tag (id, name, created_at, updated_at) VALUES ($id, $name, $now, $now)
                 ON CONFLICT(name) DO UPDATE SET deleted_at = NULL, updated_at = excluded.updated_at
@@ -1121,27 +1304,24 @@ public sealed class AppRepository
                 "INSERT INTO study_item_tag (study_item_id, tag_id) VALUES ($item, $tag)",
                 ("$item", itemId), ("$tag", tagId));
         }
-        await transaction.CommitAsync();
     }
 
-    public async Task<string> CreateMemoryCardAsync(
+    public Task<string> CreateMemoryCardAsync(
         string templateType,
         string subject,
         string prompt,
         string answer,
-        IReadOnlyList<string> structuredLines)
+        IReadOnlyList<string> structuredLines) => CreateMemoryCardAsync(new MemoryCardDraft(
+            templateType,
+            templateType switch { "comparison" => "comparison", "enumeration" => "enumeration",
+                "image_occlusion" => "diagram", "cloze" => "cloze", _ => "qa" },
+            subject, "", prompt, answer,
+            templateType == "layered_hint" ? structuredLines : Array.Empty<string>(),
+            templateType == "enumeration" ? structuredLines : Array.Empty<string>()));
+
+    public async Task<string> CreateMemoryCardAsync(MemoryCardDraft draft)
     {
-        if (string.IsNullOrWhiteSpace(prompt)) throw new ArgumentException("题干不能为空");
-        if (templateType is "qa" or "comparison" && string.IsNullOrWhiteSpace(answer))
-            throw new ArgumentException("答案不能为空");
-        if (templateType == "cloze" &&
-            !System.Text.RegularExpressions.Regex.IsMatch(prompt, @"\{\{c\d+::.+?}}"))
-            throw new ArgumentException("填空题干缺少结构化标记");
-        if (templateType == "layered_hint" &&
-            (string.IsNullOrWhiteSpace(answer) || structuredLines.Count == 0))
-            throw new ArgumentException("分层提示卡需要答案和提示");
-        if (templateType == "enumeration" && structuredLines.Count < 2)
-            throw new ArgumentException("枚举卡至少需要两个要点");
+        ValidateMemoryDraft(draft);
         var id = NewId();
         var now = DateTimeOffset.UtcNow.ToUnixTimeSeconds();
         await using var connection = await OpenAsync();
@@ -1153,9 +1333,16 @@ public sealed class AppRepository
             VALUES ($id, 'memory_card', $subject, $now, $now)
             """;
         item.Parameters.AddWithValue("$id", id);
-        item.Parameters.AddWithValue("$subject", subject);
+        item.Parameters.AddWithValue("$subject", draft.Subject);
         item.Parameters.AddWithValue("$now", now);
         await item.ExecuteNonQueryAsync();
+
+        await InsertCardProfileAsync(connection, transaction, id, new CardProfile(
+            draft.Archetype, draft.KnowledgePoint.Trim(), draft.SourceType, draft.SourceTitle.Trim(),
+            draft.SourceChapter.Trim(), draft.SourceLocator.Trim(), draft.SourceYear,
+            draft.Mechanism.Trim(), draft.Conditions.Trim(), draft.Contrast.Trim(), draft.Example.Trim(),
+            draft.CommonTrap.Trim(), draft.TransferPrompt.Trim(), draft.Mnemonic.Trim(),
+            StructuredPayload: string.IsNullOrWhiteSpace(draft.StructuredPayload) ? "{}" : draft.StructuredPayload), now);
 
         var detail = connection.CreateCommand();
         detail.Transaction = (SqliteTransaction)transaction;
@@ -1166,23 +1353,89 @@ public sealed class AppRepository
             ) VALUES ($id, $template, $prompt, $answer, $hints, $points)
             """;
         detail.Parameters.AddWithValue("$id", id);
-        detail.Parameters.AddWithValue("$template", templateType);
-        detail.Parameters.AddWithValue("$prompt", prompt.Trim());
-        detail.Parameters.AddWithValue("$answer", answer.Trim());
-        var json = System.Text.Json.JsonSerializer.Serialize(structuredLines);
-        detail.Parameters.AddWithValue("$hints", templateType == "layered_hint" ? json : "[]");
-        detail.Parameters.AddWithValue("$points", templateType == "enumeration" ? json : "[]");
+        detail.Parameters.AddWithValue("$template", draft.TemplateType);
+        detail.Parameters.AddWithValue("$prompt", draft.Prompt.Trim());
+        detail.Parameters.AddWithValue("$answer", draft.Answer.Trim());
+        detail.Parameters.AddWithValue("$hints", JsonSerializer.Serialize(draft.Hints));
+        detail.Parameters.AddWithValue("$points", JsonSerializer.Serialize(draft.AnswerPoints));
         await detail.ExecuteNonQueryAsync();
+        await ReplaceTagsInTransactionAsync(connection, transaction, id, draft.Tags ?? Array.Empty<string>(), now);
+        await CreateLearningRouteAsync(connection, transaction, id, "memory_card", draft.Subject, now);
         await transaction.CommitAsync();
         return id;
     }
 
+    private static void ValidateMemoryDraft(MemoryCardDraft draft)
+    {
+        string[] templates = ["qa", "cloze", "layered_hint", "enumeration", "image_occlusion", "comparison"];
+        string[] archetypes = ["concept", "comparison", "process", "enumeration", "scale_mapping",
+            "formula_rule", "diagram", "cloze", "qa"];
+        string[] subjects = ["data_structures", "computer_organization", "operating_systems", "computer_networks"];
+        string[] sourceTypes = ["textbook", "course", "past_exam", "practice", "notes", "other"];
+        if (!templates.Contains(draft.TemplateType) || !archetypes.Contains(draft.Archetype) ||
+            !subjects.Contains(draft.Subject) || !sourceTypes.Contains(draft.SourceType))
+            throw new ArgumentException("卡片类型、科目或来源无效");
+        if (string.IsNullOrWhiteSpace(draft.Prompt)) throw new ArgumentException("回忆问题不能为空");
+        if (draft.SourceYear is < 1900 or > 2200) throw new ArgumentException("来源年份无效");
+        using var payload = JsonDocument.Parse(string.IsNullOrWhiteSpace(draft.StructuredPayload) ? "{}" : draft.StructuredPayload);
+        if (payload.RootElement.ValueKind is not (JsonValueKind.Object or JsonValueKind.Array))
+            throw new ArgumentException("结构化字段格式无效");
+        if (draft.TemplateType is "qa" or "comparison" && string.IsNullOrWhiteSpace(draft.Answer))
+            throw new ArgumentException("核心答案不能为空");
+        if (draft.TemplateType == "cloze" && !System.Text.RegularExpressions.Regex.IsMatch(
+                draft.Prompt, @"\{\{c\d+::.+?}}"))
+            throw new ArgumentException("填空题干缺少 {{c1::答案}} 标记");
+        if (draft.TemplateType == "layered_hint" &&
+            (string.IsNullOrWhiteSpace(draft.Answer) || draft.Hints.Count == 0))
+            throw new ArgumentException("分层提示卡需要核心答案和提示");
+        if (draft.TemplateType == "enumeration" && draft.AnswerPoints.Count < 2)
+            throw new ArgumentException("枚举卡至少需要两个评分要点");
+        if (draft.Archetype is "process" or "enumeration" or "scale_mapping" && draft.AnswerPoints.Count < 2)
+            throw new ArgumentException("该知识形式至少需要两个可核对要点");
+        if (draft.Archetype == "formula_rule" &&
+            (string.IsNullOrWhiteSpace(draft.Answer) || string.IsNullOrWhiteSpace(draft.Conditions)))
+            throw new ArgumentException("公式卡需要公式和适用条件");
+    }
+
+    private static Task InsertCardProfileAsync(
+        SqliteConnection connection, System.Data.Common.DbTransaction transaction,
+        string id, CardProfile profile, long now) => ExecuteAsync(connection, transaction, """
+            INSERT INTO card_profile_v5 (study_item_id, archetype, knowledge_point, source_type,
+              source_title, source_chapter, source_locator, source_year, mechanism_markdown,
+              conditions_markdown, contrast_markdown, example_markdown, common_trap_markdown,
+              transfer_prompt_markdown, mnemonic, first_attempt_markdown, error_trigger_markdown,
+              general_method_markdown, verification_markdown, target_seconds,
+              structured_payload_json, created_at, updated_at)
+            VALUES ($id, $archetype, $knowledge, $sourceType, $sourceTitle, $sourceChapter,
+              $sourceLocator, $sourceYear, $mechanism, $conditions, $contrast, $example,
+              $trap, $transfer, $mnemonic, $firstAttempt, $errorTrigger, $method,
+              $verification, $target, $payload, $now, $now)
+            """, ("$id", id), ("$archetype", profile.Archetype), ("$knowledge", profile.KnowledgePoint),
+            ("$sourceType", profile.SourceType), ("$sourceTitle", profile.SourceTitle),
+            ("$sourceChapter", profile.SourceChapter), ("$sourceLocator", profile.SourceLocator),
+            ("$sourceYear", (object?)profile.SourceYear ?? DBNull.Value), ("$mechanism", profile.Mechanism),
+            ("$conditions", profile.Conditions), ("$contrast", profile.Contrast), ("$example", profile.Example),
+            ("$trap", profile.CommonTrap), ("$transfer", profile.TransferPrompt), ("$mnemonic", profile.Mnemonic),
+            ("$firstAttempt", profile.FirstAttempt), ("$errorTrigger", profile.ErrorTrigger),
+            ("$method", profile.GeneralMethod), ("$verification", profile.Verification),
+            ("$target", (object?)profile.TargetSeconds ?? DBNull.Value),
+            ("$payload", profile.StructuredPayload), ("$now", now));
+
     public Task<string> CreateMathProblemAsync(string sourceFile, string sourceName) =>
         CreateMathProblemAsync(new[] { sourceFile }, sourceName);
 
-    public async Task<string> CreateMathProblemAsync(IReadOnlyList<string> sourceFiles, string sourceName)
+    public Task<string> CreateMathProblemAsync(IReadOnlyList<string> sourceFiles, string sourceName) =>
+        CreateMathProblemAsync(sourceFiles, new MathErrorDraft(SourceTitle: sourceName));
+
+    public async Task<string> CreateMathProblemAsync(IReadOnlyList<string> sourceFiles, MathErrorDraft draft)
     {
         if (sourceFiles.Count is < 1 or > 5) throw new ArgumentException("每道题请选择 1–5 张图片");
+        string[] sourceTypes = ["textbook", "course", "past_exam", "practice", "notes", "other"];
+        string[] reasons = ["concept", "approach", "calculation", "misread", "forgotten_fact", "timeout", "other"];
+        if (!sourceTypes.Contains(draft.SourceType) || draft.SourceYear is < 1900 or > 2200 ||
+            draft.ErrorReason is not null && !reasons.Contains(draft.ErrorReason) ||
+            draft.TargetSeconds is < 10 or > 7200)
+            throw new ArgumentException("错题来源、年份、错因或目标用时无效");
         var mediaDirectory = Path.Combine(appDirectory, "media");
         Directory.CreateDirectory(mediaDirectory);
         var prepared = new List<(long ByteCount, string Hash, string Extension, string Destination)>();
@@ -1207,9 +1460,20 @@ public sealed class AppRepository
             INSERT INTO study_item (id, kind, subject, created_at, updated_at)
             VALUES ($id, 'math_problem', 'math', $now, $now)
             """, ("$id", problemId), ("$now", now));
+        await InsertCardProfileAsync(connection, transaction, problemId, new CardProfile(
+            "math_error", draft.KnowledgePoint.Trim(), draft.SourceType, draft.SourceTitle.Trim(),
+            draft.SourceChapter.Trim(), draft.SourceLocator.Trim(), draft.SourceYear,
+            FirstAttempt: draft.FirstAttempt.Trim(), ErrorTrigger: draft.ErrorTrigger.Trim(),
+            GeneralMethod: draft.GeneralMethod.Trim(), Verification: draft.Verification.Trim(),
+            TransferPrompt: draft.TransferPrompt.Trim(), TargetSeconds: draft.TargetSeconds), now);
         await ExecuteAsync(connection, transaction, """
-            INSERT INTO math_problem (study_item_id, source_name) VALUES ($id, $source)
-            """, ("$id", problemId), ("$source", sourceName.Trim()));
+            INSERT INTO math_problem (study_item_id, source_name, source_page, source_year,
+              solution_markdown, wrong_step_markdown, key_hint_markdown, default_error_reason)
+            VALUES ($id, $source, $locator, $year, $solution, $attempt, $hint, $reason)
+            """, ("$id", problemId), ("$source", draft.SourceTitle.Trim()),
+            ("$locator", draft.SourceLocator.Trim()), ("$year", (object?)draft.SourceYear ?? DBNull.Value),
+            ("$solution", draft.Solution.Trim()), ("$attempt", draft.FirstAttempt.Trim()),
+            ("$hint", draft.KeyHint.Trim()), ("$reason", (object?)draft.ErrorReason ?? DBNull.Value));
         for (var index = 0; index < prepared.Count; index++)
         {
             var item = prepared[index];
@@ -1236,6 +1500,8 @@ public sealed class AppRepository
             media = prepared.Select(item => new { sha256 = item.Hash, byteCount = item.ByteCount,
                 mimeType = item.Extension switch { ".png" => "image/png", ".webp" => "image/webp", _ => "image/jpeg" } }),
         }, now);
+        await ReplaceTagsInTransactionAsync(connection, transaction, problemId, draft.Tags ?? Array.Empty<string>(), now);
+        await CreateLearningRouteAsync(connection, transaction, problemId, "math_problem", "math", now);
         await transaction.CommitAsync();
         return problemId;
     }
@@ -1257,29 +1523,56 @@ public sealed class AppRepository
         return paths;
     }
 
-    public async Task UpdateMathDetailsAsync(
+    public Task UpdateMathDetailsAsync(
         string id,
         string solution,
         string wrongStep,
         string keyHint,
-        string? errorReason)
+        string? errorReason) => UpdateMathDetailsAsync(id, new MathErrorDraft(
+            Solution: solution, FirstAttempt: wrongStep, KeyHint: keyHint, ErrorReason: errorReason));
+
+    public async Task UpdateMathDetailsAsync(string id, MathErrorDraft draft)
     {
         await using var connection = await OpenAsync(); await using var transaction = await connection.BeginTransactionAsync();
         var command = connection.CreateCommand(); command.Transaction = (SqliteTransaction)transaction;
         command.CommandText = """
             UPDATE math_problem SET solution_markdown = $solution,
               wrong_step_markdown = $wrongStep, key_hint_markdown = $keyHint,
-              default_error_reason = $reason
+              default_error_reason = $reason, source_name = CASE WHEN $source = '' THEN source_name ELSE $source END,
+              source_page = CASE WHEN $locator = '' THEN source_page ELSE $locator END,
+              source_year = COALESCE($year, source_year)
             WHERE study_item_id = $id;
+            UPDATE card_profile_v5 SET
+              knowledge_point = CASE WHEN $knowledge = '' THEN knowledge_point ELSE $knowledge END,
+              source_type = $sourceType,
+              source_title = CASE WHEN $source = '' THEN source_title ELSE $source END,
+              source_chapter = CASE WHEN $chapter = '' THEN source_chapter ELSE $chapter END,
+              source_locator = CASE WHEN $locator = '' THEN source_locator ELSE $locator END,
+              source_year = COALESCE($year, source_year), first_attempt_markdown = $wrongStep,
+              error_trigger_markdown = $trigger, general_method_markdown = $method,
+              verification_markdown = $verification, transfer_prompt_markdown = $transfer,
+              target_seconds = $target, updated_at = $now WHERE study_item_id = $id;
             UPDATE study_item SET updated_at = $now WHERE id = $id;
             """;
-        command.Parameters.AddWithValue("$solution", solution.Trim());
-        command.Parameters.AddWithValue("$wrongStep", wrongStep.Trim());
-        command.Parameters.AddWithValue("$keyHint", keyHint.Trim());
-        command.Parameters.AddWithValue("$reason", (object?)errorReason ?? DBNull.Value);
+        command.Parameters.AddWithValue("$solution", draft.Solution.Trim());
+        command.Parameters.AddWithValue("$wrongStep", draft.FirstAttempt.Trim());
+        command.Parameters.AddWithValue("$keyHint", draft.KeyHint.Trim());
+        command.Parameters.AddWithValue("$reason", (object?)draft.ErrorReason ?? DBNull.Value);
+        command.Parameters.AddWithValue("$knowledge", draft.KnowledgePoint.Trim());
+        command.Parameters.AddWithValue("$sourceType", draft.SourceType);
+        command.Parameters.AddWithValue("$source", draft.SourceTitle.Trim());
+        command.Parameters.AddWithValue("$chapter", draft.SourceChapter.Trim());
+        command.Parameters.AddWithValue("$locator", draft.SourceLocator.Trim());
+        command.Parameters.AddWithValue("$year", (object?)draft.SourceYear ?? DBNull.Value);
+        command.Parameters.AddWithValue("$trigger", draft.ErrorTrigger.Trim());
+        command.Parameters.AddWithValue("$method", draft.GeneralMethod.Trim());
+        command.Parameters.AddWithValue("$verification", draft.Verification.Trim());
+        command.Parameters.AddWithValue("$transfer", draft.TransferPrompt.Trim());
+        command.Parameters.AddWithValue("$target", (object?)draft.TargetSeconds ?? DBNull.Value);
         command.Parameters.AddWithValue("$id", id);
         var now = DateTimeOffset.UtcNow.ToUnixTimeSeconds(); command.Parameters.AddWithValue("$now", now);
         await command.ExecuteNonQueryAsync();
+        if (draft.Tags is not null) await ReplaceTagsInTransactionAsync(connection, transaction, id, draft.Tags, now);
         await transaction.CommitAsync();
     }
 
@@ -1308,8 +1601,19 @@ public sealed class AppRepository
         int durationSeconds,
         string? mathResult,
         string? errorReason = null,
-        bool hintRevealed = false)
+        bool hintRevealed = false,
+        int hintLevel = 0,
+        bool answerRevealed = false,
+        int? pointHits = null,
+        int? pointCount = null,
+        int confidence = 3,
+        string reflection = "")
     {
+        if (confidence is < 1 or > 5 || hintLevel is < 0 or > 9 ||
+            (pointHits is null) != (pointCount is null) ||
+            pointCount.HasValue && (pointCount.Value <= 0 || pointHits!.Value < 0 ||
+                pointHits.Value > pointCount.Value))
+            throw new ArgumentException("复习证据无效");
         var preferences = await GetLearningPreferencesAsync();
         var preset = preferences.MemoryPreset switch { "time_saving" => 0, "reinforced" => 2, _ => 1 };
         var intensity = preferences.MathIntensity switch { "intensive" => 0, "relaxed" => 2, _ => 1 };
@@ -1583,9 +1887,138 @@ public sealed class AppRepository
               dirty = 0, rebuilt_at = $now WHERE study_item_id = $item
             """, ("$due", result.Card.DueAt), ("$count", row.Repetitions + 1),
             ("$now", now), ("$item", row.Id));
+        await AppendLearningEvidenceV5Async(connection, transaction, row, rating, reviewedAt,
+            durationSeconds, mathResult, errorReason, hintRevealed, hintLevel, answerRevealed,
+            pointHits, pointCount, confidence, reflection, historyCount, recentFailures, preset, now);
         await transaction.CommitAsync();
         return result;
     }
+
+    private static async Task CreateLearningRouteAsync(SqliteConnection connection,
+        System.Data.Common.DbTransaction transaction, string studyItemId, string kind,
+        string subject, long now)
+    {
+        var unitId = "v5-unit:" + studyItemId;
+        var taskId = "v5-task:" + studyItemId + (kind == "math_problem" ? ":repair" : "");
+        await ExecuteAsync(connection, transaction, """
+            INSERT INTO learning_unit_v5 (id, unit_type, source_study_item_id, subject, title, created_at, updated_at)
+            VALUES ($unit, $unitType, $item, $subject, '', $now, $now)
+            ON CONFLICT(source_study_item_id) DO NOTHING;
+            INSERT INTO learning_task_v5 (id, learning_unit_id, source_study_item_id, task_type, task_state,
+              math_phase, due_at, legacy_due_at, estimated_seconds, source_generation, created_at, updated_at)
+            VALUES ($task, $unit, $item, $taskType, 'active', $phase, 0, 0, $seconds, 5, $now, $now)
+            ON CONFLICT(id) DO NOTHING;
+            """, ("$unit", unitId), ("$unitType", kind == "math_problem" ? "math_error_cluster" : "memory_knowledge_package"),
+            ("$item", studyItemId), ("$subject", subject), ("$task", taskId),
+            ("$taskType", kind == "math_problem" ? "math_repair" : "memory_recall"),
+            ("$phase", kind == "math_problem" ? "repair" : DBNull.Value),
+            ("$seconds", kind == "math_problem" ? 480 : 60), ("$now", now));
+    }
+
+    private async Task AppendLearningEvidenceV5Async(SqliteConnection connection,
+        System.Data.Common.DbTransaction transaction, StudyRow row, Rating rating, long reviewedAt,
+        int durationSeconds, string? mathResult, string? errorReason, bool hintRevealed,
+        int hintLevel, bool answerRevealed, int? recordedPointHits, int? recordedPointCount,
+        int recordedConfidence, string reflection, uint historyCount, uint recentFailures,
+        int memoryPreset, long now)
+    {
+        var taskQuery = connection.CreateCommand(); taskQuery.Transaction = (SqliteTransaction)transaction;
+        taskQuery.CommandText = """
+            SELECT id, task_type, COALESCE(math_phase, ''), due_at, last_reviewed_at, repetitions,
+                   consecutive_failures
+            FROM learning_task_v5 WHERE source_study_item_id = $item
+              AND task_state IN ('active', 'legacy') AND dependency_ready = 1
+            ORDER BY CASE task_type WHEN 'math_repair' THEN 0 ELSE 1 END,
+              due_at, id LIMIT 1
+            """;
+        taskQuery.Parameters.AddWithValue("$item", row.Id);
+        await using var reader = await taskQuery.ExecuteReaderAsync();
+        if (!await reader.ReadAsync()) return;
+        var taskId = reader.GetString(0); var taskType = reader.GetString(1);
+        var phase = reader.GetString(2); var dueAt = reader.GetInt64(3);
+        var lastReviewedAt = reader.GetInt64(4); var repetitions = checked((uint)reader.GetInt64(5));
+        var failures = checked((uint)reader.GetInt64(6));
+        await reader.DisposeAsync();
+
+        string nextType = taskType, nextState = "active";
+        string? nextPhase = null;
+        long nextDue; uint nextRepetitions, nextFailures; bool correct; uint errorMask = 0;
+        int? pointHits = recordedPointHits, pointCount = recordedPointCount;
+        if (row.Kind == "memory_card")
+        {
+            var schedulerHits = pointHits ?? (rating >= Rating.Good ? 1 : 0);
+            var schedulerCount = pointCount ?? 1;
+            var scheduled = NativeScheduler.ReviewMemoryTaskV5(
+                new ScheduleCard(row.State, row.Difficulty, row.StabilityDays, row.DueAt,
+                    row.LastReviewedAt, row.Repetitions, row.Lapses),
+                memoryPreset, reviewedAt,
+                checked((uint)schedulerHits), checked((uint)schedulerCount), checked((uint)Math.Clamp(hintLevel, 0, 9)),
+                answerRevealed, durationSeconds is >= 5 and <= 3600,
+                checked((uint)Math.Max(0, durationSeconds)), checked((uint)recordedConfidence), historyCount, 0, recentFailures);
+            correct = pointCount is null ? rating >= Rating.Good : pointHits!.Value * 1.0 / pointCount.Value >= .85;
+            nextDue = scheduled.Card.DueAt; nextRepetitions = scheduled.Card.Repetitions;
+            nextFailures = correct ? 0 : failures + 1;
+        }
+        else
+        {
+            errorMask = MathErrorMask(errorReason);
+            correct = mathResult is "effortful" or "fluent";
+            var reviewed = NativeScheduler.ReviewMathTaskV5(new MathTaskStateV5(
+                MathPhase(phase), dueAt, lastReviewedAt, repetitions, failures,
+                MathPhase(phase) >= 2, MathPhase(phase) >= 3, MathPhase(phase) >= 4,
+                MathPhase(phase) >= 5), reviewedAt, correct, hintRevealed, true, false,
+                errorMask, checked((uint)Math.Max(0, durationSeconds)), checked((uint)recordedConfidence));
+            nextPhase = MathPhaseName(reviewed.State.Phase);
+            nextType = MathTaskType(reviewed.State.Phase);
+            nextState = reviewed.State.Phase switch { 5 => "awaiting_variant", 6 => "graduated", _ => "active" };
+            nextDue = reviewed.State.DueAt; nextRepetitions = reviewed.State.Repetitions;
+            nextFailures = reviewed.State.ConsecutiveFailures;
+        }
+        // The insert trigger owns the device-counter increment and outbox record.
+        // Reading the current value here makes the immutable evidence and its sync
+        // operation share one counter rather than allocating two competing values.
+        var counterCommand = connection.CreateCommand();
+        counterCommand.Transaction = (SqliteTransaction)transaction;
+        counterCommand.CommandText = "SELECT next_counter FROM local_device WHERE singleton = 1";
+        var evidenceCounter = Convert.ToInt64(await counterCommand.ExecuteScalarAsync());
+        await ExecuteAsync(connection, transaction, """
+            UPDATE learning_task_v5 SET task_type = $nextType, task_state = $state, math_phase = $phase,
+              due_at = $due, last_reviewed_at = $reviewed, repetitions = $repetitions,
+              consecutive_failures = $failures, updated_at = $now WHERE id = $task;
+            INSERT INTO learning_evidence_v5 (evidence_id, learning_task_id, task_type, reviewed_at,
+              correct, error_mask, point_hits, point_count, hint_level, answer_revealed,
+              duration_seconds, duration_reliable, confidence, reflection_markdown,
+              device_id, device_counter, created_at)
+            VALUES ($evidence, $task, $type, $reviewed, $correct, $error, $hits, $count, $hint,
+              $answerRevealed, $duration, $reliable, $confidence, $reflection, $device, $counter, $now);
+            """, ("$nextType", nextType), ("$state", nextState), ("$phase", (object?)nextPhase ?? DBNull.Value),
+            ("$due", nextDue), ("$reviewed", reviewedAt), ("$repetitions", nextRepetitions),
+            ("$failures", nextFailures), ("$now", now), ("$task", taskId), ("$evidence", NewId()),
+            ("$type", taskType), ("$correct", correct ? 1 : 0), ("$error", errorMask),
+            ("$hits", (object?)pointHits ?? DBNull.Value), ("$count", (object?)pointCount ?? DBNull.Value),
+            ("$hint", Math.Clamp(hintLevel, 0, 9)), ("$answerRevealed", answerRevealed ? 1 : 0),
+            ("$duration", Math.Max(0, durationSeconds)),
+            ("$reliable", durationSeconds is >= 5 and <= 3600 ? 1 : 0),
+            ("$confidence", recordedConfidence), ("$reflection", reflection.Trim()), ("$device", deviceId),
+            ("$counter", evidenceCounter));
+    }
+
+    private static uint MathErrorMask(string? reason) => reason switch {
+        "concept" => 1u, "approach" => 2u, "calculation" => 4u, "misread" => 8u,
+        "forgotten_fact" => 16u, "timeout" => 32u, "other" => 64u, _ => 0u,
+    };
+    private static int MathPhase(string phase) => phase switch {
+        "original" => 1, "variant" => 2, "transfer" => 3, "retention" => 4,
+        "awaiting_variant" => 5, "graduated" => 6, _ => 0,
+    };
+    private static string MathPhaseName(int phase) => phase switch {
+        1 => "original", 2 => "variant", 3 => "transfer", 4 => "retention",
+        5 => "awaiting_variant", 6 => "graduated", _ => "repair",
+    };
+    private static string MathTaskType(int phase) => phase switch {
+        1 => "math_original", 2 => "math_variant", 3 => "math_transfer", 4 => "math_retention",
+        _ => "math_repair",
+    };
 
     public string ResolveMediaPath(string relativePath) => Path.Combine(appDirectory, relativePath);
 
@@ -1657,10 +2090,10 @@ public sealed class AppRepository
         var manifest = JsonSerializer.Serialize(new
         {
             format = "reviewfault-backup",
-            version = 4,
+            version = 5,
             appVersion = AppVersion,
-            schemaVersion = 4,
-            schedulerAbiVersion = 4,
+            schemaVersion = 5,
+            schedulerAbiVersion = 5,
             exportedAt = DateTimeOffset.UtcNow.ToUnixTimeSeconds(),
             excludedTables = new[] { "local_device", "sync_cursor", "sync_revision",
                 "sync_outbox", "sync_conflict", "local_ink_draft" },
@@ -1729,7 +2162,8 @@ public sealed class AppRepository
                 !((backupVersion == 1 && schemaVersion == 1 && abiVersion == 1) ||
                   (backupVersion == 2 && schemaVersion == 2 && abiVersion == 2) ||
                   (backupVersion == 3 && schemaVersion == 3 && abiVersion == 3) ||
-                  (backupVersion == 4 && schemaVersion == 4 && abiVersion == 4)))
+                  (backupVersion == 4 && schemaVersion == 4 && abiVersion == 4) ||
+                  (backupVersion == 5 && schemaVersion == 5 && abiVersion == 5)))
                 throw new InvalidDataException("不是受支持的 ReviewFault 备份");
             var listedFiles = new HashSet<string>(StringComparer.Ordinal);
             long listedBytes = 0;
@@ -1789,10 +2223,17 @@ public sealed class AppRepository
                     await command.ExecuteNonQueryAsync();
                     restoredVersion = 4;
                 }
+                if (restoredVersion == 4)
+                {
+                    command.CommandText = await File.ReadAllTextAsync(Path.Combine(
+                        AppContext.BaseDirectory, "schema", "005_v0_5.sql"));
+                    await command.ExecuteNonQueryAsync();
+                    restoredVersion = 5;
+                }
                 command.CommandText = "PRAGMA integrity_check";
                 if ((string?)await command.ExecuteScalarAsync() != "ok")
                     throw new InvalidDataException("备份数据库完整性检查失败");
-                if (restoredVersion != 4)
+                if (restoredVersion != 5)
                     throw new InvalidDataException("备份数据库版本不兼容");
                 command.CommandText = "PRAGMA foreign_key_check";
                 await using var invalidReferences = await command.ExecuteReaderAsync();

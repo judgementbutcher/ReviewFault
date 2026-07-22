@@ -11,7 +11,7 @@
     <WindowsPackageType>None</WindowsPackageType>
     <Nullable>enable</Nullable>
     <ImplicitUsings>enable</ImplicitUsings>
-    <Version>0.5.0</Version>
+    <Version>0.6.0</Version>
     <ReviewFaultRoot>$([System.IO.Path]::GetFullPath('$(MSBuildProjectDirectory)\..\..\..'))</ReviewFaultRoot>
     <NativeBuildDir>$(BaseIntermediateOutputPath)native</NativeBuildDir>
   </PropertyGroup>
@@ -30,6 +30,9 @@
              CopyToOutputDirectory="PreserveNewest" />
     <Content Include="$(ReviewFaultRoot)\schema\migrations\004_v0_4.sql"
              Link="schema\004_v0_4.sql"
+             CopyToOutputDirectory="PreserveNewest" />
+    <Content Include="$(ReviewFaultRoot)\schema\migrations\005_v0_5.sql"
+             Link="schema\005_v0_5.sql"
              CopyToOutputDirectory="PreserveNewest" />
   </ItemGroup>
 

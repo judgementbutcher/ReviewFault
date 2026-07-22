@@ -1,8 +1,16 @@
-# 跨端数据契约 v4
+# 跨端数据契约 v5
 
-schema v4 通过 `004_v0_4.sql` 从 v3 顺序升级，旧迁移保持不变。升级保留旧事件表并把
+schema v5 通过 `005_v0_5.sql` 从 v4 顺序升级，旧迁移保持不变。升级保留旧事件表，并新增知识单元、任务、关系和不可变学习证据；旧内容的既定到期时间只复制到 legacy 任务，首次 v5 证据前不重排。
 v1/v2/v3 历史投影为不可变 `review_action_v4`；`due_at`、难度和熟练度属于可重建调度投影，
 不会作为同步事实覆盖其他设备。
+
+## v5 制卡与学习证据
+
+`card_profile_v5` 与旧的 `memory_card` / `math_problem` 一对一关联。旧表继续提供兼容读取所需的题面、答案、图片和基础错题字段；profile 保存知识形式、考点、来源、机制/条件/对比、陷阱/迁移以及数学诊断链。`structured_payload_json` 只承载可校验的对象或数组，例如 FLOPS 的 `rows[{term, exponent, magnitude}]` 和公式规则的边界示例。
+
+408 记忆卡通过 `hints_json` 和 `answer_points_json` 记录分层提示与评分要点；数学错题通过 `first_attempt_markdown`、`error_trigger_markdown`、`general_method_markdown`、`verification_markdown` 和 `target_seconds` 记录重做诊断。标签仍由 `tag`、`study_item_tag` 和 `relation_operation` 表示，自动标签使用 `学科/`、`形式/`、`考点/`、`来源/`、`章节/`、`错因/` 命名空间。
+
+每次复习追加一条不可变 `learning_evidence_v5`，记录提示层级、是否先看答案、评分点命中数、作答前信心、复盘文本和可靠耗时。`review_action_v4` 仍作为兼容调度事实写入；v5 任务表是可重建投影，不能反向改写旧事件或旧到期时间。
 
 ## 调度与事件
 

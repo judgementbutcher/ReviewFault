@@ -6,13 +6,17 @@ const read = (relative) => readFileSync(new URL(relative, import.meta.url), 'utf
 const initial = read('../migrations/001_initial.sql');
 const migration = read('../migrations/002_v0_2.sql');
 const migrationV3 = read('../migrations/003_v0_3.sql');
+const migrationV4 = read('../migrations/004_v0_4.sql');
+const migrationV5 = read('../migrations/005_v0_5.sql');
 
 const sources = [
   {
     name: 'Android',
     text: read('../../apps/android/app/src/main/java/cn/reviewfault/app/data/AppDatabase.kt'),
     method(name) {
-      return this.text.match(new RegExp(`fun ${name}\\([\\s\\S]*?rawQuery\\(\\s*\"\"\"([\\s\\S]*?)\"\"\"`))[1];
+      const sql = this.text.match(new RegExp(`fun ${name}\\([\\s\\S]*?rawQuery\\(\\s*\"\"\"([\\s\\S]*?)\"\"\"`))[1];
+      const columns = this.text.match(/private val STUDY_ROW_COLUMNS = """([\s\S]*?)"""/)[1].trim();
+      return sql.replace('$STUDY_ROW_COLUMNS', columns);
     },
   },
   {
@@ -44,6 +48,10 @@ function addItem(db, id, kind, subject, state = 0, dueAt = 0, extra = '') {
   `).run(id, kind, subject, state, difficulty, stability, dueAt, reviewed,
     state === 0 ? 0 : 1, dayStart - 1000, dayStart - 1000,
     ...(extra ? [Number(extra.split('=')[1])] : []));
+  if (state !== 0) db.prepare(`
+    UPDATE learning_task_v5 SET last_reviewed_at = ?, repetitions = 1
+    WHERE source_study_item_id = ?
+  `).run(reviewed, id);
 }
 
 function addNewMemoryReview(db, eventId, itemId) {
@@ -67,9 +75,10 @@ function encodedExcluded(...ids) {
   return ids.length === 0 ? '' : `|${ids.sort().join('|')}|`;
 }
 
-function nextParameters(excluded, includeNewItems = 1) {
-  return [excluded, excluded, now, includeNewItems,
-    dayStart, dayStart, dayStart, dayStart];
+function nextParameters(source, excluded, includeNewItems = 1) {
+  const parameters = [excluded, excluded, now, includeNewItems,
+    dayStart, dayStart, dayStart];
+  return source.name === 'Android' ? [...parameters, dayStart] : parameters;
 }
 
 for (const source of sources) {
@@ -77,6 +86,8 @@ for (const source of sources) {
   db.exec(initial);
   db.exec(migration);
   db.exec(migrationV3);
+  db.exec(migrationV4);
+  db.exec(migrationV5);
   db.exec(`
     UPDATE learning_preferences SET daily_new_memory_limit = 2,
       enable_computer_networks = 0, include_memory_cards = 1,
@@ -105,26 +116,28 @@ for (const source of sources) {
     `${source.name} dashboard exposes the seven-day load forecast`);
 
   const nextSql = source.method('nextForReview');
-  assert.equal(Object.values(db.prepare(nextSql).get(...nextParameters('')))[0], 'math-overdue',
+  assert.equal(Object.values(db.prepare(nextSql).get(...nextParameters(source, '')))[0], 'math-overdue',
     `${source.name} must start with an overdue enabled item`);
   assert.equal(Object.values(db.prepare(nextSql).get(
-    ...nextParameters(encodedExcluded('math-overdue'))))[0], 'memory-due',
+    ...nextParameters(source, encodedExcluded('math-overdue'))))[0], 'memory-due',
     `${source.name} skips an excluded first item without changing the queue order`);
-  assert.equal(db.prepare(nextSql).get(...nextParameters(
+  assert.equal(db.prepare(nextSql).get(...nextParameters(source,
     encodedExcluded('math-overdue', 'memory-due'), 0)), undefined,
     `${source.name} returns no item when every due candidate is excluded for the session`);
 
   addNewMemoryReview(db, 'review-new-a', 'memory-new-a');
   addNewMemoryReview(db, 'review-new-b', 'memory-new-b');
   db.exec(`UPDATE study_item SET due_at = ${now + 1000}
-    WHERE id IN ('memory-due', 'math-overdue')`);
-  assert.equal(Object.values(db.prepare(nextSql).get(...nextParameters('')))[0], 'math-new',
+    WHERE id IN ('memory-due', 'math-overdue');
+    UPDATE learning_task_v5 SET due_at = ${now + 1000}
+    WHERE source_study_item_id IN ('memory-due', 'math-overdue')`);
+  assert.equal(Object.values(db.prepare(nextSql).get(...nextParameters(source, '')))[0], 'math-new',
     `${source.name} keeps new math available after the daily 408 limit is reached`);
-  assert.equal(db.prepare(nextSql).get(...nextParameters('', 0)), undefined,
+  assert.equal(db.prepare(nextSql).get(...nextParameters(source, '', 0)), undefined,
     `${source.name} freezes backlog protection for the whole focus session`);
 
   db.exec(`UPDATE learning_preferences SET include_math_problems = 0 WHERE singleton = 1`);
-  assert.equal(db.prepare(nextSql).get(...nextParameters('')), undefined,
+  assert.equal(db.prepare(nextSql).get(...nextParameters(source, '')), undefined,
     `${source.name} applies queue-type and daily-limit preferences`);
   db.close();
 }
