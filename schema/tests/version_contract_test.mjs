@@ -5,7 +5,7 @@ const version = '0.6.1';
 const read = (relative) => readFileSync(new URL(relative, import.meta.url), 'utf8');
 
 const contracts = [
-  ['README', '../../README.md', `当前开发版本为 **${version}**`],
+  ['README', '../../README.md', `当前版本为 **${version}**`],
   ['CMake', '../../CMakeLists.txt', `VERSION ${version}`],
   ['Android', '../../apps/android/app/build.gradle.kts', `versionName = "${version}"`],
   ['Harmony', '../../apps/harmony/AppScope/app.json5', `"versionName": "${version}"`],
